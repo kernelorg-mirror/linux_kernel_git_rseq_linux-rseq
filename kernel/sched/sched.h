@@ -1221,6 +1221,7 @@ static inline void __set_task_cpu(struct task_struct *p, unsigned int cpu)
 #endif
 	p->wake_cpu = cpu;
 #endif
+	rseq_migrate(p);
 }
 
 /*
