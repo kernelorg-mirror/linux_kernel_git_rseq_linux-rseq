@@ -1,0 +1,358 @@
+// SPDX-License-Identifier: GPL-2.0 or LGPL-2.1
+#include <linux/bpf.h>
+#include <linux/nospec.h>
+
+#include "do_on_cpu_private.h"
+
+int is_imm64(const struct bpf_insn *insn)
+{
+	unsigned int bpf_class = BPF_CLASS(insn->code);
+
+	switch (bpf_class) {
+	case BPF_LD:
+	case BPF_LDX:
+	case BPF_ST:
+	case BPF_STX:
+		if (BPF_MODE(insn->code) == BPF_IMM && BPF_SIZE(insn->code) == BPF_DW)
+			return 1;
+		break;
+	case BPF_ALU:
+	case BPF_ALU64:
+	case BPF_JMP:
+	case BPF_JMP32:
+		break;
+
+		/* Classes not implemented. */
+	default:
+		return -EINVAL;
+	}
+	return 0;
+}
+
+/*
+ * When loading a 64-bit immediate, the following instruction appears
+ * as a 32-bit immediate load.
+ */
+static
+int validate_insn(struct bpf_insn *insn, size_t i, size_t len)
+{
+	int ret;
+
+	switch (insn->code) {
+		/* Load from immediate. */
+	case BPF_LD | BPF_W | BPF_IMM:
+	case BPF_LD | BPF_DW | BPF_IMM:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		break;
+
+		/* Load from address. */
+	case BPF_LDX | BPF_W | BPF_MEM:
+	case BPF_LDX | BPF_H | BPF_MEM:
+	case BPF_LDX | BPF_B | BPF_MEM:
+	case BPF_LDX | BPF_DW | BPF_MEM:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->src_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->src_reg = array_index_nospec((u8)insn->src_reg, MAX_BPF_REG);
+		break;
+
+		/* Load from address with acquire semantic. */
+	case BPF_LDX | BPF_W | BPF_MEM_ACQ_REL:
+	case BPF_LDX | BPF_H | BPF_MEM_ACQ_REL:
+	case BPF_LDX | BPF_B | BPF_MEM_ACQ_REL:
+	case BPF_LDX | BPF_DW | BPF_MEM_ACQ_REL:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->src_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->src_reg = array_index_nospec((u8)insn->src_reg, MAX_BPF_REG);
+		break;
+
+		/* Store from immediate to address. */
+	case BPF_ST | BPF_W | BPF_MEM:
+	case BPF_ST | BPF_H | BPF_MEM:
+	case BPF_ST | BPF_B | BPF_MEM:
+	case BPF_ST | BPF_DW | BPF_MEM:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		break;
+
+		/* Store from immediate to address with release semantic. */
+	case BPF_ST | BPF_W | BPF_MEM_ACQ_REL:
+	case BPF_ST | BPF_H | BPF_MEM_ACQ_REL:
+	case BPF_ST | BPF_B | BPF_MEM_ACQ_REL:
+	case BPF_ST | BPF_DW | BPF_MEM_ACQ_REL:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		break;
+
+		/* Store from register to address. */
+	case BPF_STX | BPF_W | BPF_MEM:
+	case BPF_STX | BPF_H | BPF_MEM:
+	case BPF_STX | BPF_B | BPF_MEM:
+	case BPF_STX | BPF_DW | BPF_MEM:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->src_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->src_reg = array_index_nospec((u8)insn->src_reg, MAX_BPF_REG);
+		break;
+
+		/* Store from register to address with release semantic. */
+	case BPF_STX | BPF_W | BPF_MEM_ACQ_REL:
+	case BPF_STX | BPF_H | BPF_MEM_ACQ_REL:
+	case BPF_STX | BPF_B | BPF_MEM_ACQ_REL:
+	case BPF_STX | BPF_DW | BPF_MEM_ACQ_REL:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->src_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->src_reg = array_index_nospec((u8)insn->src_reg, MAX_BPF_REG);
+		break;
+
+	case BPF_ALU | BPF_ADD | BPF_K:
+	case BPF_ALU | BPF_SUB | BPF_K:
+	case BPF_ALU | BPF_OR | BPF_K:
+	case BPF_ALU | BPF_AND | BPF_K:
+	case BPF_ALU | BPF_XOR | BPF_K:
+	case BPF_ALU | BPF_MOV | BPF_K:
+	case BPF_ALU64 | BPF_ADD | BPF_K:
+	case BPF_ALU64 | BPF_SUB | BPF_K:
+	case BPF_ALU64 | BPF_OR | BPF_K:
+	case BPF_ALU64 | BPF_AND | BPF_K:
+	case BPF_ALU64 | BPF_XOR | BPF_K:
+	case BPF_ALU64 | BPF_MOV | BPF_K:
+	case BPF_ALU | BPF_NEG:
+	case BPF_ALU64 | BPF_NEG:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		break;
+
+	case BPF_ALU | BPF_MUL | BPF_K:
+	case BPF_ALU64 | BPF_MUL | BPF_K:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->imm < 0) {
+			printk(KERN_ERR "Error: Multiply by negative value (%d)\n",
+			       insn->imm);
+			goto error;
+		}
+		break;
+
+	case BPF_ALU | BPF_DIV | BPF_K:
+	case BPF_ALU64 | BPF_DIV | BPF_K:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->imm <= 0) {
+			printk(KERN_ERR "Error: Divide by %d\n", insn->imm);
+			goto error;
+		}
+		break;
+
+	case BPF_ALU | BPF_MOD | BPF_K:
+	case BPF_ALU64 | BPF_MOD | BPF_K:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->imm <= 0) {
+			printk(KERN_ERR "Error: Modulo by %d\n", insn->imm);
+			goto error;
+		}
+		break;
+
+	case BPF_ALU | BPF_LSH | BPF_K:
+	case BPF_ALU | BPF_RSH | BPF_K:
+	case BPF_ALU | BPF_ARSH | BPF_K:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->imm >= 32 || insn->imm < 0) {
+			printk(KERN_ERR "Error: Shift by %d undefined.\n",
+			       insn->imm);
+			goto error;
+		}
+		break;
+
+	case BPF_ALU64 | BPF_LSH | BPF_K:
+	case BPF_ALU64 | BPF_RSH | BPF_K:
+	case BPF_ALU64 | BPF_ARSH | BPF_K:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->imm >= 64 || insn->imm < 0) {
+			printk(KERN_ERR "Error: Shift by %d undefined.\n",
+			       insn->imm);
+			goto error;
+		}
+		break;
+
+	case BPF_ALU | BPF_ADD | BPF_X:
+	case BPF_ALU | BPF_SUB | BPF_X:
+	case BPF_ALU | BPF_MUL | BPF_X:
+	case BPF_ALU | BPF_DIV | BPF_X:
+	case BPF_ALU | BPF_OR | BPF_X:
+	case BPF_ALU | BPF_AND | BPF_X:
+	case BPF_ALU | BPF_LSH | BPF_X:
+	case BPF_ALU | BPF_RSH | BPF_X:
+	case BPF_ALU | BPF_MOD | BPF_X:
+	case BPF_ALU | BPF_XOR | BPF_X:
+	case BPF_ALU | BPF_MOV | BPF_X:
+	case BPF_ALU | BPF_ARSH | BPF_X:
+	case BPF_ALU64 | BPF_ADD | BPF_X:
+	case BPF_ALU64 | BPF_SUB | BPF_X:
+	case BPF_ALU64 | BPF_MUL | BPF_X:
+	case BPF_ALU64 | BPF_DIV | BPF_X:
+	case BPF_ALU64 | BPF_OR | BPF_X:
+	case BPF_ALU64 | BPF_AND | BPF_X:
+	case BPF_ALU64 | BPF_LSH | BPF_X:
+	case BPF_ALU64 | BPF_RSH | BPF_X:
+	case BPF_ALU64 | BPF_MOD | BPF_X:
+	case BPF_ALU64 | BPF_XOR | BPF_X:
+	case BPF_ALU64 | BPF_MOV | BPF_X:
+	case BPF_ALU64 | BPF_ARSH | BPF_X:
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->src_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->src_reg = array_index_nospec((u8)insn->src_reg, MAX_BPF_REG);
+		break;
+
+	case BPF_ALU | BPF_MB:
+	case BPF_ALU64 | BPF_MB:
+		break;
+
+	case BPF_JMP | BPF_JA:
+	case BPF_JMP32 | BPF_JA:
+		if (insn->off == -1)
+			insn->off = -2;
+		break;
+
+	case BPF_JMP | BPF_JEQ | BPF_K:
+	case BPF_JMP | BPF_JGT | BPF_K:
+	case BPF_JMP | BPF_JGE | BPF_K:
+	case BPF_JMP | BPF_JSET | BPF_K:
+	case BPF_JMP | BPF_JNE | BPF_K:
+	case BPF_JMP | BPF_JLT | BPF_K:
+	case BPF_JMP | BPF_JLE | BPF_K:
+	case BPF_JMP | BPF_JSGT | BPF_K:
+	case BPF_JMP | BPF_JSGE | BPF_K:
+	case BPF_JMP | BPF_JSLT | BPF_K:
+	case BPF_JMP | BPF_JSLE | BPF_K:
+	case BPF_JMP32 | BPF_JEQ | BPF_K:
+	case BPF_JMP32 | BPF_JGT | BPF_K:
+	case BPF_JMP32 | BPF_JGE | BPF_K:
+	case BPF_JMP32 | BPF_JSET | BPF_K:
+	case BPF_JMP32 | BPF_JNE | BPF_K:
+	case BPF_JMP32 | BPF_JLT | BPF_K:
+	case BPF_JMP32 | BPF_JLE | BPF_K:
+	case BPF_JMP32 | BPF_JSGT | BPF_K:
+	case BPF_JMP32 | BPF_JSGE | BPF_K:
+	case BPF_JMP32 | BPF_JSLT | BPF_K:
+	case BPF_JMP32 | BPF_JSLE | BPF_K:
+		if (insn->off == -1)
+			insn->off = -2;
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		break;
+
+	case BPF_JMP | BPF_JEQ | BPF_X:
+	case BPF_JMP | BPF_JGT | BPF_X:
+	case BPF_JMP | BPF_JGE | BPF_X:
+	case BPF_JMP | BPF_JSET | BPF_X:
+	case BPF_JMP | BPF_JNE | BPF_X:
+	case BPF_JMP | BPF_JLT | BPF_X:
+	case BPF_JMP | BPF_JLE | BPF_X:
+	case BPF_JMP | BPF_JSGT | BPF_X:
+	case BPF_JMP | BPF_JSGE | BPF_X:
+	case BPF_JMP | BPF_JSLT | BPF_X:
+	case BPF_JMP | BPF_JSLE | BPF_X:
+	case BPF_JMP32 | BPF_JEQ | BPF_X:
+	case BPF_JMP32 | BPF_JGT | BPF_X:
+	case BPF_JMP32 | BPF_JGE | BPF_X:
+	case BPF_JMP32 | BPF_JSET | BPF_X:
+	case BPF_JMP32 | BPF_JNE | BPF_X:
+	case BPF_JMP32 | BPF_JLT | BPF_X:
+	case BPF_JMP32 | BPF_JLE | BPF_X:
+	case BPF_JMP32 | BPF_JSGT | BPF_X:
+	case BPF_JMP32 | BPF_JSGE | BPF_X:
+	case BPF_JMP32 | BPF_JSLT | BPF_X:
+	case BPF_JMP32 | BPF_JSLE | BPF_X:
+		if (insn->off == -1)
+			insn->off = -2;
+		if (insn->dst_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->dst_reg = array_index_nospec((u8)insn->dst_reg, MAX_BPF_REG);
+		if (insn->src_reg >= MAX_BPF_REG)
+			goto error_reg;
+		insn->src_reg = array_index_nospec((u8)insn->src_reg, MAX_BPF_REG);
+		break;
+
+	case BPF_JMP | BPF_EXIT:
+	case BPF_JMP32 | BPF_EXIT:
+		break;
+
+	default:
+		goto error_insn;
+	}
+
+	ret = is_imm64(insn);
+	if (ret < 0)
+		goto error_insn;
+	if (ret && (i + 1 == len ||
+	    (insn + 1)->code != (BPF_LD | BPF_W | BPF_IMM) ||
+	    (insn + 1)->dst_reg != BPF_REG_0 ||
+	    (insn + 1)->src_reg != BPF_REG_0 ||
+	    (insn + 1)->off != 0)) {
+			goto error_imm;
+	}
+
+	return 0;
+
+error_imm:
+	printk(KERN_ERR "do_on_cpu bytecode validation: invalid 64-bit immediate at offset %zu\n", i);
+	goto error;
+
+error_insn:
+	printk(KERN_ERR "do_on_cpu bytecode validation: unsupported code %d\n",
+	       insn->code);
+	goto error;
+
+error_reg:
+	printk(KERN_ERR "do_on_cpu bytecode validation: invalid register.\n");
+	printk(KERN_ERR "dst: %hhu, src: %hhu.\n", insn->dst_reg, insn->src_reg);
+	goto error;
+
+error:
+	return -EINVAL;
+}
+
+int do_on_cpu_validate(struct bpf_insn *bytecode, size_t len)
+{
+	size_t i;
+
+	for (i = 0; i < len; i++) {
+		struct bpf_insn *insn;
+		int ret;
+
+		i = array_index_nospec(i, len);
+		insn = &bytecode[i];
+		ret = validate_insn(insn, i, len);
+		if (ret)
+			return ret;
+	}
+	return 0;
+}
