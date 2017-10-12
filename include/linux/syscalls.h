@@ -68,6 +68,7 @@ struct perf_event_attr;
 struct file_handle;
 struct sigaltstack;
 struct rseq;
+struct cpu_op;
 union bpf_attr;
 struct io_uring_params;
 
@@ -988,6 +989,8 @@ asmlinkage long sys_rseq(struct rseq __user *rseq, uint32_t rseq_len,
 asmlinkage long sys_pidfd_send_signal(int pidfd, int sig,
 				       siginfo_t __user *info,
 				       unsigned int flags);
+asmlinkage long sys_do_on_cpu(struct bpf_insn __user *ubytecode, u32 len,
+			      int64_t *result, int cpu, int flags);
 
 /*
  * Architecture-specific system calls
