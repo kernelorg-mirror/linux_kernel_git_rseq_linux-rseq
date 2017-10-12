@@ -1549,6 +1549,8 @@ config RSEQ
 	bool "Enable rseq() system call" if EXPERT
 	default y
 	depends on HAVE_RSEQ
+	depends on MMU
+	select DO_ON_CPU
 	select MEMBARRIER
 	help
 	  Enable the restartable sequences system call. It provides a
@@ -1567,6 +1569,22 @@ config DEBUG_RSEQ
 	  Enable extra debugging checks for the rseq system call.
 
 	  If unsure, say N.
+
+# DO_ON_CPU depends on MMU for is_zero_pfn()
+config DO_ON_CPU
+	bool "Enable do_on_cpu() system call" if EXPERT
+	default y
+	depends on MMU
+	help
+	  Enable the do_on_cpu() system call.
+	  It allows user-space to perform a sequence of operations on
+	  per-CPU data atomically with respect to concurrent execution on that
+	  CPU. Useful as single-stepping fall-back for restartable sequences,
+	  migration of data between per-CPU data structures, and for performing
+	  more complex operations on per-CPU data that would not be otherwise
+	  possible to do with restartable sequences.
+
+	  If unsure, say Y.
 
 config EMBEDDED
 	bool "Embedded system"

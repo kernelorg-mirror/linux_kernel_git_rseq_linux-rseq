@@ -4130,6 +4130,13 @@ F:	Documentation/driver-api/pm/cpuidle.rst
 F:	drivers/cpuidle/*
 F:	include/linux/cpuidle.h
 
+DO ON CPU SYSTEM CALL
+M:	Mathieu Desnoyers <mathieu.desnoyers@efficios.com>
+L:	linux-kernel@vger.kernel.org
+S:	Supported
+F:	kernel/do_on_cpu/
+F:	include/uapi/linux/do_on_cpu.h
+
 CRAMFS FILESYSTEM
 M:	Nicolas Pitre <nico@fluxnic.net>
 S:	Maintained
