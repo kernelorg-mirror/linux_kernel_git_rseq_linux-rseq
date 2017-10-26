@@ -115,48 +115,25 @@
  *   F2. Return false.
  */
 
-/*
- * The rseq_event_counter allow user-space to detect preemption and
- * signal delivery. It increments at least once before returning to
- * user-space if a thread is preempted or has a signal delivered. It is
- * not meant to be an exact counter of such events.
- *
- * Overflow of the event counter is not a problem in practice. It
- * increments at most once between each user-space thread instruction
- * executed, so we would need a thread to execute 2^32 instructions or
- * more between rseq_start() and rseq_finish(), while single-stepping,
- * for this to be an issue.
- *
- * On 64-bit architectures, both cpu_id and event_counter can be updated
- * with a single 64-bit store. On 32-bit architectures, __put_user() is
- * expected to perform two 32-bit single-copy stores to guarantee
- * single-copy atomicity semantics for other threads.
- */
-static bool rseq_update_cpu_id_event_counter(struct task_struct *t,
-		bool inc_event_counter)
+static bool rseq_update_cpu_id(struct task_struct *t)
 {
-	union rseq_cpu_event u;
+	int32_t cpu_id = raw_smp_processor_id();
 
-	u.e.cpu_id = raw_smp_processor_id();
-	u.e.event_counter = inc_event_counter ? ++t->rseq_event_counter :
-			t->rseq_event_counter;
-	if (__put_user(u.v, &t->rseq->u.v))
+	if (__put_user(cpu_id, &t->rseq->cpu_id))
 		return false;
 	trace_rseq_update(t);
 	return true;
 }
 
-static bool rseq_reset_rseq_cpu_event(struct task_struct *t)
+static bool rseq_reset_rseq_cpu_id(struct task_struct *t)
 {
-	union rseq_cpu_event u;
+	int32_t cpu_id = -1;
 
 	/*
 	 * Reset cpu_id to -1, so any user coming in after unregistration can
 	 * figure out that rseq needs to be registered again.
 	 */
-	u.e.cpu_id = -1;
-	u.e.event_counter = 0;
-	if (__put_user(u.v, &t->rseq->u.v))
+	if (__put_user(cpu_id, &t->rseq->cpu_id))
 		return false;
 	return true;
 }
@@ -263,8 +240,7 @@ static int rseq_ip_fixup(struct pt_regs *regs)
 	ret = rseq_get_rseq_cs(t, &start_ip, &post_commit_offset, &abort_ip,
 			&cs_flags);
 	trace_rseq_ip_fixup((void __user *)instruction_pointer(regs),
-		start_ip, post_commit_offset, abort_ip, t->rseq_event_counter,
-		ret);
+		start_ip, post_commit_offset, abort_ip, ret);
 	if (!ret)
 		return -EFAULT;
 
@@ -316,7 +292,7 @@ void __rseq_handle_notify_resume(struct pt_regs *regs)
 	ret = rseq_ip_fixup(regs);
 	if (unlikely(ret < 0))
 		goto error;
-	if (unlikely(!rseq_update_cpu_id_event_counter(t, ret)))
+	if (unlikely(!rseq_update_cpu_id(t)))
 		goto error;
 	return;
 
@@ -338,7 +314,7 @@ SYSCALL_DEFINE4(rseq, struct rseq __user *, rseq, uint32_t, rseq_len,
 			return -EINVAL;
 		if (current->rseq_sig != sig)
 			return -EPERM;
-		if (!rseq_reset_rseq_cpu_event(current))
+		if (!rseq_reset_rseq_cpu_id(current))
 			return -EFAULT;
 		current->rseq = NULL;
 		current->rseq_len = 0;

@@ -67,30 +67,6 @@ struct rseq_cs {
 	RSEQ_FIELD_u32_u64(abort_ip);
 } __attribute__((aligned(4 * sizeof(uint64_t))));
 
-union rseq_cpu_event {
-	struct {
-		/*
-		 * Restartable sequences cpu_id field.
-		 * Updated by the kernel, and read by user-space with
-		 * single-copy atomicity semantics. Aligned on 32-bit.
-		 * Negative values are reserved for user-space.
-		 */
-		int32_t cpu_id;
-		/*
-		 * Restartable sequences event_counter field.
-		 * Updated by the kernel, and read by user-space with
-		 * single-copy atomicity semantics. Aligned on 32-bit.
-		 */
-		uint32_t event_counter;
-	} e;
-	/*
-	 * On architectures with 64-bit aligned reads, both cpu_id and
-	 * event_counter can be read with single-copy atomicity
-	 * semantics.
-	 */
-	uint64_t v;
-};
-
 /*
  * struct rseq is aligned on 4 * 8 bytes to ensure it is always
  * contained within a single cache-line.
@@ -98,7 +74,14 @@ union rseq_cpu_event {
  * A single struct rseq per thread is allowed.
  */
 struct rseq {
-	union rseq_cpu_event u;
+	/*
+	 * Restartable sequences cpu_id field. Updated by the kernel, and
+	 * read by user-space with single-copy atomicity semantics. Aligned
+	 * on 32-bit. Negative values are reserved for user-space.
+	 */
+	int32_t cpu_id;
+	/* Reserved for future use. */
+	uint32_t reserved;
 	/*
 	 * Restartable sequences rseq_cs field.
 	 *
