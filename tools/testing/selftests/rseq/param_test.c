@@ -23,7 +23,7 @@ static inline pid_t gettid(void)
 #define NR_INJECT	9
 static int loop_cnt[NR_INJECT + 1];
 
-static int opt_modulo;
+static int opt_modulo, quiet;
 
 static int opt_yield, opt_signal, opt_sleep,
 		opt_disable_rseq, opt_threads = 200,
@@ -35,7 +35,11 @@ static __thread __attribute__((tls_model("initial-exec"))) unsigned int signals_
 
 static __thread __attribute__((tls_model("initial-exec"))) unsigned int yield_mod_cnt, nr_retry;
 
-#define printf_nobench(fmt, ...)	printf(fmt, ## __VA_ARGS__)
+#define printf_verbose(fmt, ...)			\
+	do {						\
+		if (!quiet)				\
+			printf(fmt, ## __VA_ARGS__);	\
+	} while (0)
 
 #define RSEQ_INJECT_INPUT \
 	, [loop_cnt_1]"m"(loop_cnt[1]) \
@@ -121,7 +125,7 @@ static __thread __attribute__((tls_model("initial-exec"))) unsigned int yield_mo
 
 #else
 
-#define printf_nobench(fmt, ...)
+#define printf_verbose(fmt, ...)
 
 #endif /* BENCHMARK */
 
@@ -218,18 +222,21 @@ static int rseq_percpu_lock(struct percpu_lock *lock)
 		/* Try fast path. */
 		rseq_state = rseq_start();
 		cpu = rseq_cpu_at_start(rseq_state);
+		if (unlikely(cpu < 0))
+			goto slowpath;
 		if (unlikely(lock->c[cpu].v != 0))
 			continue;	/* Retry.*/
 		if (likely(rseq_finish(&lock->c[cpu].v, 1, rseq_state)))
 			break;
-		else
 #endif
 		{
+		slowpath:
+			__attribute__((unused));
 			/* Fallback on cpu_opv system call. */
 			intptr_t expect = 0, n = 1;
 			int ret;
 
-			cpu = rseq_current_cpu_raw();
+			cpu = rseq_current_cpu();
 			ret = cpu_op_cmpstore(&lock->c[cpu].v, &expect, &n,
 				sizeof(intptr_t), cpu);
 			if (likely(!ret))
@@ -270,12 +277,13 @@ void *test_percpu_spinlock_thread(void *arg)
 		rseq_percpu_unlock(&data->lock, cpu);
 #ifndef BENCHMARK
 		if (i != 0 && !(i % (thread_data->reps / 10)))
-			printf("tid %d: count %d\n", (int) gettid(), i);
+			printf_verbose("tid %d: count %d\n", (int) gettid(), i);
 #endif
 	}
-	printf_nobench("tid %d: number of retry: %d, signals delivered: %u\n",
+	printf_verbose("tid %d: number of retry: %d, signals delivered: %u\n",
 		(int) gettid(), nr_retry, signals_delivered);
-	if (rseq_unregister_current_thread())
+	if (!opt_disable_rseq && thread_data->reg
+			&& rseq_unregister_current_thread())
 		abort();
 	return NULL;
 }
@@ -347,16 +355,20 @@ void *test_percpu_inc_thread(void *arg)
 		/* Try fast path. */
 		rseq_state = rseq_start();
 		cpu = rseq_cpu_at_start(rseq_state);
+		if (unlikely(cpu < 0))
+			goto slowpath;
 		newval = (intptr_t)data->c[cpu].count + 1;
 		targetptr = (intptr_t *)&data->c[cpu].count;
 		if (unlikely(!rseq_finish(targetptr, newval, rseq_state)))
 #endif
 		{
+		slowpath:
+			__attribute__((unused));
 			for (;;) {
 				/* Fallback on cpu_opv system call. */
 				int ret;
 
-				cpu = rseq_current_cpu_raw();
+				cpu = rseq_current_cpu();
 				ret = cpu_op_add(&data->c[cpu].count, 1,
 					sizeof(intptr_t), cpu);
 				if (likely(!ret))
@@ -367,12 +379,13 @@ void *test_percpu_inc_thread(void *arg)
 
 #ifndef BENCHMARK
 		if (i != 0 && !(i % (thread_data->reps / 10)))
-			printf("tid %d: count %d\n", (int) gettid(), i);
+			printf_verbose("tid %d: count %d\n", (int) gettid(), i);
 #endif
 	}
-	printf_nobench("tid %d: number of retry: %d, signals delivered: %u\n",
+	printf_verbose("tid %d: number of retry: %d, signals delivered: %u\n",
 		(int) gettid(), nr_retry, signals_delivered);
-	if (rseq_unregister_current_thread())
+	if (!opt_disable_rseq && thread_data->reg
+			&& rseq_unregister_current_thread())
 		abort();
 	return NULL;
 }
@@ -429,17 +442,21 @@ int percpu_list_push(struct percpu_list *list, struct percpu_list_node *node)
 	/* Try fast path. */
 	rseq_state = rseq_start();
 	cpu = rseq_cpu_at_start(rseq_state);
+	if (unlikely(cpu < 0))
+		goto slowpath;
 	newval = (intptr_t)node;
 	targetptr = (intptr_t *)&list->c[cpu].head;
 	node->next = list->c[cpu].head;
 	if (unlikely(!rseq_finish(targetptr, newval, rseq_state)))
 #endif
 	{
+	slowpath:
+		__attribute__((unused));
 		/* Fallback on cpu_opv system call. */
 		for (;;) {
 			int ret;
 
-			cpu = rseq_current_cpu_raw();
+			cpu = rseq_current_cpu();
 			/* Load list->c[cpu].head with single-copy atomicity. */
 			expect = (intptr_t)READ_ONCE(list->c[cpu].head);
 			newval = (intptr_t)node;
@@ -471,6 +488,8 @@ struct percpu_list_node *percpu_list_pop(struct percpu_list *list)
 	/* Try fast path. */
 	rseq_state = rseq_start();
 	cpu = rseq_cpu_at_start(rseq_state);
+	if (unlikely(cpu < 0))
+		goto slowpath;
 	/* Load list->c[cpu].head with single-copy atomicity. */
 	head = READ_ONCE(list->c[cpu].head);
 	if (!head)
@@ -482,11 +501,13 @@ struct percpu_list_node *percpu_list_pop(struct percpu_list *list)
 	if (unlikely(!rseq_finish(targetptr, newval, rseq_state)))
 #endif
 	{
+	slowpath:
+		__attribute__((unused));
 		/* Fallback on cpu_opv system call. */
 		for (;;) {
 			int ret;
 
-			cpu = rseq_current_cpu_raw();
+			cpu = rseq_current_cpu();
 			/* Load list->c[cpu].head with single-copy atomicity. */
 			head = READ_ONCE(list->c[cpu].head);
 			if (!head)
@@ -513,7 +534,7 @@ void *test_percpu_list_thread(void *arg)
 	int i;
 	struct percpu_list *list = (struct percpu_list *)arg;
 
-	if (rseq_register_current_thread())
+	if (!opt_disable_rseq && rseq_register_current_thread())
 		abort();
 
 	for (i = 0; i < opt_reps; i++) {
@@ -525,7 +546,7 @@ void *test_percpu_list_thread(void *arg)
 			percpu_list_push(list, node);
 	}
 
-	if (rseq_unregister_current_thread())
+	if (!opt_disable_rseq && rseq_unregister_current_thread())
 		abort();
 
 	return NULL;
@@ -618,6 +639,8 @@ bool percpu_buffer_push(struct percpu_buffer *buffer,
 	/* Try fast path. */
 	rseq_state = rseq_start();
 	cpu = rseq_cpu_at_start(rseq_state);
+	if (unlikely(cpu < 0))
+		goto slowpath;
 	/* Load offset with single-copy atomicity. */
 	offset = READ_ONCE(buffer->c[cpu].offset);
 	if (offset == buffer->c[cpu].buflen)
@@ -630,11 +653,13 @@ bool percpu_buffer_push(struct percpu_buffer *buffer,
 			targetptr_final, newval_final, rseq_state)))
 #endif
 	{
+	slowpath:
+		__attribute__((unused));
 		/* Fallback on cpu_opv system call. */
 		for (;;) {
 			int ret;
 
-			cpu = rseq_current_cpu_raw();
+			cpu = rseq_current_cpu();
 			/* Load offset with single-copy atomicity. */
 			offset = READ_ONCE(buffer->c[cpu].offset);
 			if (offset == buffer->c[cpu].buflen)
@@ -666,6 +691,8 @@ struct percpu_buffer_node *percpu_buffer_pop(struct percpu_buffer *buffer)
 	/* Try fast path. */
 	rseq_state = rseq_start();
 	cpu = rseq_cpu_at_start(rseq_state);
+	if (unlikely(cpu < 0))
+		goto slowpath;
 	/* Load offset with single-copy atomicity. */
 	offset = READ_ONCE(buffer->c[cpu].offset);
 	if (offset == 0)
@@ -676,11 +703,13 @@ struct percpu_buffer_node *percpu_buffer_pop(struct percpu_buffer *buffer)
 	if (unlikely(!rseq_finish(targetptr, newval, rseq_state)))
 #endif
 	{
+	slowpath:
+		__attribute__((unused));
 		/* Fallback on cpu_opv system call. */
 		for (;;) {
 			int ret;
 
-			cpu = rseq_current_cpu_raw();
+			cpu = rseq_current_cpu();
 			/* Load offset with single-copy atomicity. */
 			offset = READ_ONCE(buffer->c[cpu].offset);
 			if (offset == 0)
@@ -704,7 +733,7 @@ void *test_percpu_buffer_thread(void *arg)
 	int i;
 	struct percpu_buffer *buffer = (struct percpu_buffer *)arg;
 
-	if (rseq_register_current_thread())
+	if (!opt_disable_rseq && rseq_register_current_thread())
 		abort();
 
 	for (i = 0; i < opt_reps; i++) {
@@ -720,7 +749,7 @@ void *test_percpu_buffer_thread(void *arg)
 		}
 	}
 
-	if (rseq_unregister_current_thread())
+	if (!opt_disable_rseq && rseq_unregister_current_thread())
 		abort();
 
 	return NULL;
@@ -828,6 +857,8 @@ bool percpu_memcpy_buffer_push(struct percpu_memcpy_buffer *buffer,
 	/* Try fast path. */
 	rseq_state = rseq_start();
 	cpu = rseq_cpu_at_start(rseq_state);
+	if (unlikely(cpu < 0))
+		goto slowpath;
 	/* Load offset with single-copy atomicity. */
 	offset = READ_ONCE(buffer->c[cpu].offset);
 	if (offset == buffer->c[cpu].buflen)
@@ -841,11 +872,13 @@ bool percpu_memcpy_buffer_push(struct percpu_memcpy_buffer *buffer,
 			targetptr_final, newval_final, rseq_state)))
 #endif
 	{
+	slowpath:
+		__attribute__((unused));
 		/* Fallback on cpu_opv system call. */
 		for (;;) {
 			int ret;
 
-			cpu = rseq_current_cpu_raw();
+			cpu = rseq_current_cpu();
 			/* Load offset with single-copy atomicity. */
 			offset = READ_ONCE(buffer->c[cpu].offset);
 			if (offset == buffer->c[cpu].buflen)
@@ -880,6 +913,8 @@ bool percpu_memcpy_buffer_pop(struct percpu_memcpy_buffer *buffer,
 	/* Try fast path. */
 	rseq_state = rseq_start();
 	cpu = rseq_cpu_at_start(rseq_state);
+	if (unlikely(cpu < 0))
+		goto slowpath;
 	/* Load offset with single-copy atomicity. */
 	offset = READ_ONCE(buffer->c[cpu].offset);
 	if (offset == 0)
@@ -893,11 +928,13 @@ bool percpu_memcpy_buffer_pop(struct percpu_memcpy_buffer *buffer,
 			targetptr_final, newval_final, rseq_state)))
 #endif
 	{
+	slowpath:
+		__attribute__((unused));
 		/* Fallback on cpu_opv system call. */
 		for (;;) {
 			int ret;
 
-			cpu = rseq_current_cpu_raw();
+			cpu = rseq_current_cpu();
 			/* Load offset with single-copy atomicity. */
 			offset = READ_ONCE(buffer->c[cpu].offset);
 			if (offset == 0)
@@ -923,7 +960,7 @@ void *test_percpu_memcpy_buffer_thread(void *arg)
 	int i;
 	struct percpu_memcpy_buffer *buffer = (struct percpu_memcpy_buffer *)arg;
 
-	if (rseq_register_current_thread())
+	if (!opt_disable_rseq && rseq_register_current_thread())
 		abort();
 
 	for (i = 0; i < opt_reps; i++) {
@@ -941,7 +978,7 @@ void *test_percpu_memcpy_buffer_thread(void *arg)
 		}
 	}
 
-	if (rseq_unregister_current_thread())
+	if (!opt_disable_rseq && rseq_unregister_current_thread())
 		abort();
 
 	return NULL;
@@ -1057,7 +1094,7 @@ static int set_signal_handler(void)
 		return ret;
 	}
 
-	printf_nobench("Signal handler set for SIGUSR1\n");
+	printf_verbose("Signal handler set for SIGUSR1\n");
 
 	return ret;
 }
@@ -1085,6 +1122,7 @@ static void show_usage(int argc, char **argv)
 	printf("	[-d] Disable rseq system call (no initialization)\n");
 	printf("	[-D M] Disable rseq for each M threads\n");
 	printf("	[-T test] Choose test: (s)pinlock, (l)ist, (b)uffer, (m)emcpy, (i)ncrement\n");
+	printf("	[-q] Quiet output.\n");
 	printf("	[-h] Show this help.\n");
 	printf("\n");
 }
@@ -1093,8 +1131,6 @@ int main(int argc, char **argv)
 {
 	int i;
 
-	if (set_signal_handler())
-		goto error;
 	for (i = 1; i < argc; i++) {
 		if (argv[i][0] != '-')
 			continue;
@@ -1206,37 +1242,43 @@ int main(int argc, char **argv)
 			}
 			i++;
 			break;
+		case 'q':
+			quiet = 1;
+			break;
 		default:
 			show_usage(argc, argv);
 			goto error;
 		}
 	}
 
+	if (set_signal_handler())
+		goto error;
+
 	if (!opt_disable_rseq && rseq_register_current_thread())
 		goto error;
 	switch (opt_test) {
 	case 's':
-		printf_nobench("spinlock\n");
+		printf_verbose("spinlock\n");
 		test_percpu_spinlock();
 		break;
 	case 'l':
-		printf_nobench("linked list\n");
+		printf_verbose("linked list\n");
 		test_percpu_list();
 		break;
 	case 'b':
-		printf_nobench("buffer\n");
+		printf_verbose("buffer\n");
 		test_percpu_buffer();
 		break;
 	case 'm':
-		printf_nobench("memcpy buffer\n");
+		printf_verbose("memcpy buffer\n");
 		test_percpu_memcpy_buffer();
 		break;
 	case 'i':
-		printf_nobench("counter increment\n");
+		printf_verbose("counter increment\n");
 		test_percpu_inc();
 		break;
 	}
-	if (rseq_unregister_current_thread())
+	if (!opt_disable_rseq && rseq_unregister_current_thread())
 		abort();
 end:
 	return 0;
