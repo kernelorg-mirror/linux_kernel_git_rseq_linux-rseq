@@ -5,18 +5,22 @@ EXTRA_ARGS=${@}
 OLDIFS="$IFS"
 IFS=$'\n'
 TEST_LIST=(
-	"s"
-	"l"
-	"b"
-	"m"
-	"i"
+	"-T s"
+	"-T l"
+	"-T b"
+	"-T b -M"
+	"-T m"
+	"-T m -M"
+	"-T i"
 )
 
 TEST_NAME=(
 	"spinlock"
 	"list"
 	"buffer"
+	"buffer with barrier"
 	"memcpy"
+	"memcpy with barrier"
 	"increment"
 )
 IFS="$OLDIFS"
@@ -26,7 +30,7 @@ function do_tests()
 	local i=0
 	while [ "$i" -lt "${#TEST_LIST[@]}" ]; do
 		echo "Running test ${TEST_NAME[$i]}"
-		./param_test -T ${TEST_LIST[$i]} ${@} ${EXTRA_ARGS} || exit 1
+		./param_test ${TEST_LIST[$i]} ${@} ${EXTRA_ARGS} || exit 1
 		let "i++"
 	done
 }
@@ -66,7 +70,6 @@ function inject_blocking()
 	OLDIFS="$IFS"
 	IFS=$'\n'
 	INJECT_LIST=(
-		"6"
 		"7"
 		"8"
 		"9"

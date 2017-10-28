@@ -24,139 +24,512 @@
 
 #define RSEQ_SIG	0x53053053
 
-#define smp_mb()	__asm__ __volatile__ ("dmb" : : : "memory")
-#define smp_rmb()	__asm__ __volatile__ ("dmb" : : : "memory")
-#define smp_wmb()	__asm__ __volatile__ ("dmb" : : : "memory")
+#define rseq_smp_mb()	__asm__ __volatile__ ("dmb" : : : "memory")
+#define rseq_smp_rmb()	__asm__ __volatile__ ("dmb" : : : "memory")
+#define rseq_smp_wmb()	__asm__ __volatile__ ("dmb" : : : "memory")
 
-#define smp_load_acquire(p)						\
+#define rseq_smp_load_acquire(p)					\
 __extension__ ({							\
-	__typeof(*p) ____p1 = READ_ONCE(*p);				\
-	smp_mb();							\
+	__typeof(*p) ____p1 = RSEQ_READ_ONCE(*p);			\
+	rseq_smp_mb();							\
 	____p1;								\
 })
 
-#define smp_acquire__after_ctrl_dep()	smp_rmb()
+#define rseq_smp_acquire__after_ctrl_dep()	rseq_smp_rmb()
 
-#define smp_store_release(p, v)						\
+#define rseq_smp_store_release(p, v)					\
 do {									\
-	smp_mb();							\
+	rseq_smp_mb();							\
 	WRITE_ONCE(*p, v);						\
 } while (0)
 
-#define has_fast_acquire_release()	0
-#define has_single_copy_load_64()	1
+#define RSEQ_ASM_DEFINE_TABLE(section, version, flags,			\
+			start_ip, post_commit_offset, abort_ip)		\
+		".pushsection " __rseq_str(section) ", \"aw\"\n\t"	\
+		".balign 32\n\t"					\
+		".word " __rseq_str(version) ", " __rseq_str(flags) "\n\t" \
+		".word " __rseq_str(start_ip) ", 0x0, " __rseq_str(post_commit_offset) ", 0x0, " __rseq_str(abort_ip) ", 0x0\n\t" \
+		".popsection\n\t"
 
-/*
- * The __rseq_table section can be used by debuggers to better handle
- * single-stepping through the restartable critical sections.
- */
+#define RSEQ_ASM_STORE_RSEQ_CS(label, cs_label, rseq_cs)		\
+		__rseq_str(label) ":\n\t"				\
+		RSEQ_INJECT_ASM(1)					\
+		"adr r0, " __rseq_str(cs_label) "\n\t"			\
+		"str r0, [%[" __rseq_str(rseq_cs) "]]\n\t"
 
-#define RSEQ_FINISH_ASM(_target_final, _to_write_final, _start_value, \
-		_failure, _spec_store, _spec_input, \
-		_final_store, _final_input, _extra_clobber, \
-		_setup, _teardown, _scratch) \
-do { \
-	_scratch \
-	__asm__ __volatile__ goto ( \
-		".pushsection __rseq_table, \"aw\"\n\t" \
-		".balign 32\n\t" \
-		".word 0x0, 0x0, 1f, 0x0, 2f-1f, 0x0, 5f, 0x0\n\t" \
-		".popsection\n\t" \
-		"1:\n\t" \
-		_setup \
-		RSEQ_INJECT_ASM(1) \
-		"adr r0, 3f\n\t" \
-		"str r0, [%[rseq_cs]]\n\t" \
-		RSEQ_INJECT_ASM(2) \
-		"ldr r0, %[current_event_counter]\n\t" \
-		"cmp %[start_event_counter], r0\n\t" \
-		"bne 5f\n\t" \
-		RSEQ_INJECT_ASM(3) \
-		_spec_store \
-		_final_store \
-		"2:\n\t" \
-		RSEQ_INJECT_ASM(5) \
-		_teardown \
-		"b 4f\n\t" \
-		".balign 32\n\t" \
-		"3:\n\t" \
-		".word 0x0, 0x0, 1b, 0x0, 2b-1b, 0x0, 5f, 0x0\n\t" \
-		".long " __stringify(RSEQ_SIG) "\n\t" \
-		"5:\n\t" \
-		_teardown \
-		"b %l[failure]\n\t" \
-		"4:\n\t" \
-		: /* gcc asm goto does not allow outputs */ \
-		: [start_event_counter]"r"((_start_value).event_counter), \
-		  [current_event_counter]"m"((_start_value).rseqp->u.e.event_counter), \
-		  [rseq_cs]"r"(&(_start_value).rseqp->rseq_cs) \
-		  _spec_input \
-		  _final_input \
-		  RSEQ_INJECT_INPUT \
-		: "r0", "memory", "cc" \
-		  _extra_clobber \
-		  RSEQ_INJECT_CLOBBER \
-		: _failure \
-	); \
-} while (0)
+#define RSEQ_ASM_CMP_CPU_ID(cpu_id, current_cpu_id, label)		\
+		RSEQ_INJECT_ASM(2)					\
+		"ldr r0, %[" __rseq_str(current_cpu_id) "]\n\t"	\
+		"cmp %[" __rseq_str(cpu_id) "], r0\n\t"		\
+		"bne " __rseq_str(label) "\n\t"
 
-#define RSEQ_FINISH_FINAL_STORE_ASM() \
-		"str %[to_write_final], [%[target_final]]\n\t"
+#define RSEQ_ASM_DEFINE_ABORT(table_label, label, section, sig,		\
+			teardown, abort_label, version, flags, start_ip,\
+			post_commit_offset, abort_ip)			\
+		__rseq_str(table_label) ":\n\t" 			\
+		".word " __rseq_str(version) ", " __rseq_str(flags) "\n\t" \
+		".word " __rseq_str(start_ip) ", 0x0, " __rseq_str(post_commit_offset) ", 0x0, " __rseq_str(abort_ip) ", 0x0\n\t" \
+		".word " __rseq_str(RSEQ_SIG) "\n\t"			\
+		__rseq_str(label) ":\n\t"				\
+		teardown						\
+		"b %l[" __rseq_str(abort_label) "]\n\t"
 
-#define RSEQ_FINISH_FINAL_STORE_RELEASE_ASM() \
-		"dmb\n\t" \
-		RSEQ_FINISH_FINAL_STORE_ASM()
+#define RSEQ_ASM_DEFINE_CMPFAIL(label, section, teardown, cmpfail_label) \
+		__rseq_str(label) ":\n\t"				\
+		teardown						\
+		"b %l[" __rseq_str(cmpfail_label) "]\n\t"
 
-#define RSEQ_FINISH_FINAL_STORE_INPUT(_target_final, _to_write_final) \
-		, [to_write_final]"r"(_to_write_final), \
-		[target_final]"r"(_target_final)
+static inline __attribute__((always_inline))
+int rseq_cmpeqv_storev(intptr_t *v, intptr_t expect, intptr_t newv,
+		int cpu)
+{
+	RSEQ_INJECT_C(9)
 
-#define RSEQ_FINISH_SPECULATIVE_STORE_ASM() \
-		"str %[to_write_spec], [%[target_spec]]\n\t" \
+	__asm__ __volatile__ goto (
+		RSEQ_ASM_DEFINE_TABLE(__rseq_table, 0x0, 0x0, 1f, 2f-1f, 4f)
+		RSEQ_ASM_STORE_RSEQ_CS(1, 3f, rseq_cs)
+		RSEQ_ASM_CMP_CPU_ID(cpu_id, current_cpu_id, 4f)
+		RSEQ_INJECT_ASM(3)
+		"ldr r0, %[v]\n\t"
+		"cmp %[expect], r0\n\t"
+		"bne 5f\n\t"
 		RSEQ_INJECT_ASM(4)
+		/* final store */
+		"str %[newv], %[v]\n\t"
+		"2:\n\t"
+		RSEQ_INJECT_ASM(5)
+		"b 6f\n\t"
+		RSEQ_ASM_DEFINE_ABORT(3, 4, __rseq_failure, RSEQ_SIG, "", abort,
+			0x0, 0x0, 1b, 2b-1b, 4f)
+		RSEQ_ASM_DEFINE_CMPFAIL(5, __rseq_failure, "", cmpfail)
+		"6:\n\t"
+		: /* gcc asm goto does not allow outputs */
+		: [cpu_id]"r"(cpu),
+		  [current_cpu_id]"m"(__rseq_abi.cpu_id),
+		  [rseq_cs]"r"(&__rseq_abi.rseq_cs),
+		  [v]"m"(*v),
+		  [expect]"r"(expect),
+		  [newv]"r"(newv)
+		  RSEQ_INJECT_INPUT
+		: "r0", "memory", "cc"
+		  RSEQ_INJECT_CLOBBER
+		: abort, cmpfail
+	);
+	return 0;
+abort:
+	RSEQ_INJECT_FAILED
+	return -1;
+cmpfail:
+	return 1;
+}
 
-#define RSEQ_FINISH_SPECULATIVE_STORE_INPUT(_target_spec, _to_write_spec) \
-		, [to_write_spec]"r"(_to_write_spec), \
-		[target_spec]"r"(_target_spec)
+static inline __attribute__((always_inline))
+int rseq_cmpnev_storeoffp_load(intptr_t *v, intptr_t expectnot,
+		off_t voffp, intptr_t *load, int cpu)
+{
+	RSEQ_INJECT_C(9)
 
-/* TODO: implement a faster memcpy. */
-#define RSEQ_FINISH_MEMCPY_STORE_ASM() \
-		"cmp %[len_memcpy], #0\n\t" \
+	__asm__ __volatile__ goto (
+		RSEQ_ASM_DEFINE_TABLE(__rseq_table, 0x0, 0x0, 1f, 2f-1f, 4f)
+		RSEQ_ASM_STORE_RSEQ_CS(1, 3f, rseq_cs)
+		RSEQ_ASM_CMP_CPU_ID(cpu_id, current_cpu_id, 4f)
+		RSEQ_INJECT_ASM(3)
+		"ldr r0, %[v]\n\t"
+		"cmp %[expectnot], r0\n\t"
+		"beq 5f\n\t"
+		RSEQ_INJECT_ASM(4)
+		"str r0, %[load]\n\t"
+		"add r0, %[voffp]\n\t"
+		"ldr r0, [r0]\n\t"
+		/* final store */
+		"str r0, %[v]\n\t"
+		"2:\n\t"
+		RSEQ_INJECT_ASM(5)
+		"b 6f\n\t"
+		RSEQ_ASM_DEFINE_ABORT(3, 4, __rseq_failure, RSEQ_SIG, "", abort,
+			0x0, 0x0, 1b, 2b-1b, 4f)
+		RSEQ_ASM_DEFINE_CMPFAIL(5, __rseq_failure, "", cmpfail)
+		"6:\n\t"
+		: /* gcc asm goto does not allow outputs */
+		: [cpu_id]"r"(cpu),
+		  [current_cpu_id]"m"(__rseq_abi.cpu_id),
+		  [rseq_cs]"r"(&__rseq_abi.rseq_cs),
+		  /* final store input */
+		  [v]"m"(*v),
+		  [expectnot]"r"(expectnot),
+		  [voffp]"Ir"(voffp),
+		  [load]"m"(*load)
+		  RSEQ_INJECT_INPUT
+		: "r0", "memory", "cc"
+		  RSEQ_INJECT_CLOBBER
+		: abort, cmpfail
+	);
+	return 0;
+abort:
+	RSEQ_INJECT_FAILED
+	return -1;
+cmpfail:
+	return 1;
+}
+
+static inline __attribute__((always_inline))
+int rseq_addv(intptr_t *v, intptr_t count, int cpu)
+{
+	RSEQ_INJECT_C(9)
+
+	__asm__ __volatile__ goto (
+		RSEQ_ASM_DEFINE_TABLE(__rseq_table, 0x0, 0x0, 1f, 2f-1f, 4f)
+		RSEQ_ASM_STORE_RSEQ_CS(1, 3f, rseq_cs)
+		RSEQ_ASM_CMP_CPU_ID(cpu_id, current_cpu_id, 4f)
+		RSEQ_INJECT_ASM(3)
+		"ldr r0, %[v]\n\t"
+		"add r0, %[count]\n\t"
+		/* final store */
+		"str r0, %[v]\n\t"
+		"2:\n\t"
+		RSEQ_INJECT_ASM(4)
+		"b 6f\n\t"
+		RSEQ_ASM_DEFINE_ABORT(3, 4, __rseq_failure, RSEQ_SIG, "", abort,
+			0x0, 0x0, 1b, 2b-1b, 4f)
+		"6:\n\t"
+		: /* gcc asm goto does not allow outputs */
+		: [cpu_id]"r"(cpu),
+		  [current_cpu_id]"m"(__rseq_abi.cpu_id),
+		  [rseq_cs]"r"(&__rseq_abi.rseq_cs),
+		  [v]"m"(*v),
+		  [count]"Ir"(count)
+		  RSEQ_INJECT_INPUT
+		: "r0", "memory", "cc"
+		  RSEQ_INJECT_CLOBBER
+		: abort
+	);
+	return 0;
+abort:
+	RSEQ_INJECT_FAILED
+	return -1;
+}
+
+static inline __attribute__((always_inline))
+int rseq_cmpeqv_trystorev_storev(intptr_t *v, intptr_t expect,
+		intptr_t *v2, intptr_t newv2, intptr_t newv,
+		int cpu)
+{
+	RSEQ_INJECT_C(9)
+
+	__asm__ __volatile__ goto (
+		RSEQ_ASM_DEFINE_TABLE(__rseq_table, 0x0, 0x0, 1f, 2f-1f, 4f)
+		RSEQ_ASM_STORE_RSEQ_CS(1, 3f, rseq_cs)
+		RSEQ_ASM_CMP_CPU_ID(cpu_id, current_cpu_id, 4f)
+		RSEQ_INJECT_ASM(3)
+		"ldr r0, %[v]\n\t"
+		"cmp %[expect], r0\n\t"
+		"bne 5f\n\t"
+		RSEQ_INJECT_ASM(4)
+		/* try store */
+		"str %[newv2], %[v2]\n\t"
+		RSEQ_INJECT_ASM(5)
+		/* final store */
+		"str %[newv], %[v]\n\t"
+		"2:\n\t"
+		RSEQ_INJECT_ASM(6)
+		"b 6f\n\t"
+		RSEQ_ASM_DEFINE_ABORT(3, 4, __rseq_failure, RSEQ_SIG, "", abort,
+			0x0, 0x0, 1b, 2b-1b, 4f)
+		RSEQ_ASM_DEFINE_CMPFAIL(5, __rseq_failure, "", cmpfail)
+		"6:\n\t"
+		: /* gcc asm goto does not allow outputs */
+		: [cpu_id]"r"(cpu),
+		  [current_cpu_id]"m"(__rseq_abi.cpu_id),
+		  [rseq_cs]"r"(&__rseq_abi.rseq_cs),
+		  /* try store input */
+		  [v2]"m"(*v2),
+		  [newv2]"r"(newv2),
+		  /* final store input */
+		  [v]"m"(*v),
+		  [expect]"r"(expect),
+		  [newv]"r"(newv)
+		  RSEQ_INJECT_INPUT
+		: "r0", "memory", "cc"
+		  RSEQ_INJECT_CLOBBER
+		: abort, cmpfail
+	);
+	return 0;
+abort:
+	RSEQ_INJECT_FAILED
+	return -1;
+cmpfail:
+	return 1;
+}
+
+static inline __attribute__((always_inline))
+int rseq_cmpeqv_trystorev_storev_release(intptr_t *v, intptr_t expect,
+		intptr_t *v2, intptr_t newv2, intptr_t newv,
+		int cpu)
+{
+	RSEQ_INJECT_C(9)
+
+	__asm__ __volatile__ goto (
+		RSEQ_ASM_DEFINE_TABLE(__rseq_table, 0x0, 0x0, 1f, 2f-1f, 4f)
+		RSEQ_ASM_STORE_RSEQ_CS(1, 3f, rseq_cs)
+		RSEQ_ASM_CMP_CPU_ID(cpu_id, current_cpu_id, 4f)
+		RSEQ_INJECT_ASM(3)
+		"ldr r0, %[v]\n\t"
+		"cmp %[expect], r0\n\t"
+		"bne 5f\n\t"
+		RSEQ_INJECT_ASM(4)
+		/* try store */
+		"str %[newv2], %[v2]\n\t"
+		RSEQ_INJECT_ASM(5)
+		"dmb\n\t"	/* full mb provides store-release */
+		/* final store */
+		"str %[newv], %[v]\n\t"
+		"2:\n\t"
+		RSEQ_INJECT_ASM(6)
+		"b 6f\n\t"
+		RSEQ_ASM_DEFINE_ABORT(3, 4, __rseq_failure, RSEQ_SIG, "", abort,
+			0x0, 0x0, 1b, 2b-1b, 4f)
+		RSEQ_ASM_DEFINE_CMPFAIL(5, __rseq_failure, "", cmpfail)
+		"6:\n\t"
+		: /* gcc asm goto does not allow outputs */
+		: [cpu_id]"r"(cpu),
+		  [current_cpu_id]"m"(__rseq_abi.cpu_id),
+		  [rseq_cs]"r"(&__rseq_abi.rseq_cs),
+		  /* try store input */
+		  [v2]"m"(*v2),
+		  [newv2]"r"(newv2),
+		  /* final store input */
+		  [v]"m"(*v),
+		  [expect]"r"(expect),
+		  [newv]"r"(newv)
+		  RSEQ_INJECT_INPUT
+		: "r0", "memory", "cc"
+		  RSEQ_INJECT_CLOBBER
+		: abort, cmpfail
+	);
+	return 0;
+abort:
+	RSEQ_INJECT_FAILED
+	return -1;
+cmpfail:
+	return 1;
+}
+
+static inline __attribute__((always_inline))
+int rseq_cmpeqv_cmpeqv_storev(intptr_t *v, intptr_t expect,
+		intptr_t *v2, intptr_t expect2, intptr_t newv,
+		int cpu)
+{
+	RSEQ_INJECT_C(9)
+
+	__asm__ __volatile__ goto (
+		RSEQ_ASM_DEFINE_TABLE(__rseq_table, 0x0, 0x0, 1f, 2f-1f, 4f)
+		RSEQ_ASM_STORE_RSEQ_CS(1, 3f, rseq_cs)
+		RSEQ_ASM_CMP_CPU_ID(cpu_id, current_cpu_id, 4f)
+		RSEQ_INJECT_ASM(3)
+		"ldr r0, %[v]\n\t"
+		"cmp %[expect], r0\n\t"
+		"bne 5f\n\t"
+		RSEQ_INJECT_ASM(4)
+		"ldr r0, %[v2]\n\t"
+		"cmp %[expect2], r0\n\t"
+		"bne 5f\n\t"
+		RSEQ_INJECT_ASM(5)
+		/* final store */
+		"str %[newv], %[v]\n\t"
+		"2:\n\t"
+		RSEQ_INJECT_ASM(6)
+		"b 6f\n\t"
+		RSEQ_ASM_DEFINE_ABORT(3, 4, __rseq_failure, RSEQ_SIG, "", abort,
+			0x0, 0x0, 1b, 2b-1b, 4f)
+		RSEQ_ASM_DEFINE_CMPFAIL(5, __rseq_failure, "", cmpfail)
+		"6:\n\t"
+		: /* gcc asm goto does not allow outputs */
+		: [cpu_id]"r"(cpu),
+		  [current_cpu_id]"m"(__rseq_abi.cpu_id),
+		  [rseq_cs]"r"(&__rseq_abi.rseq_cs),
+		  /* cmp2 input */
+		  [v2]"m"(*v2),
+		  [expect2]"r"(expect2),
+		  /* final store input */
+		  [v]"m"(*v),
+		  [expect]"r"(expect),
+		  [newv]"r"(newv)
+		  RSEQ_INJECT_INPUT
+		: "r0", "memory", "cc"
+		  RSEQ_INJECT_CLOBBER
+		: abort, cmpfail
+	);
+	return 0;
+abort:
+	RSEQ_INJECT_FAILED
+	return -1;
+cmpfail:
+	return 1;
+}
+
+static inline __attribute__((always_inline))
+int rseq_cmpeqv_trymemcpy_storev(intptr_t *v, intptr_t expect,
+		void *dst, void *src, size_t len, intptr_t newv,
+		int cpu)
+{
+	uint32_t rseq_scratch[3];
+
+	RSEQ_INJECT_C(9)
+
+	__asm__ __volatile__ goto (
+		RSEQ_ASM_DEFINE_TABLE(__rseq_table, 0x0, 0x0, 1f, 2f-1f, 4f)
+		"str %[src], %[rseq_scratch0]\n\t"
+		"str %[dst], %[rseq_scratch1]\n\t"
+		"str %[len], %[rseq_scratch2]\n\t"
+		RSEQ_ASM_STORE_RSEQ_CS(1, 3f, rseq_cs)
+		RSEQ_ASM_CMP_CPU_ID(cpu_id, current_cpu_id, 4f)
+		RSEQ_INJECT_ASM(3)
+		"ldr r0, %[v]\n\t"
+		"cmp %[expect], r0\n\t"
+		"bne 5f\n\t"
+		RSEQ_INJECT_ASM(4)
+		/* try memcpy */
+		"cmp %[len], #0\n\t" \
 		"beq 333f\n\t" \
 		"222:\n\t" \
-		"ldrb %%r0, [%[to_write_memcpy]]\n\t" \
-		"strb %%r0, [%[target_memcpy]]\n\t" \
-		"adds %[to_write_memcpy], #1\n\t" \
-		"adds %[target_memcpy], #1\n\t" \
-		"subs %[len_memcpy], #1\n\t" \
+		"ldrb %%r0, [%[src]]\n\t" \
+		"strb %%r0, [%[dst]]\n\t" \
+		"adds %[src], #1\n\t" \
+		"adds %[dst], #1\n\t" \
+		"subs %[len], #1\n\t" \
 		"bne 222b\n\t" \
 		"333:\n\t" \
+		RSEQ_INJECT_ASM(5)
+		/* final store */
+		"str %[newv], %[v]\n\t"
+		"2:\n\t"
+		RSEQ_INJECT_ASM(6)
+		/* teardown */
+		"ldr %[len], %[rseq_scratch2]\n\t"
+		"ldr %[dst], %[rseq_scratch1]\n\t"
+		"ldr %[src], %[rseq_scratch0]\n\t"
+		"b 6f\n\t"
+		RSEQ_ASM_DEFINE_ABORT(3, 4, __rseq_failure, RSEQ_SIG,
+			/* teardown */
+			"ldr %[len], %[rseq_scratch2]\n\t"
+			"ldr %[dst], %[rseq_scratch1]\n\t"
+			"ldr %[src], %[rseq_scratch0]\n\t",
+			abort, 0x0, 0x0, 1b, 2b-1b, 4f)
+		RSEQ_ASM_DEFINE_CMPFAIL(5, __rseq_failure,
+			/* teardown */
+			"ldr %[len], %[rseq_scratch2]\n\t"
+			"ldr %[dst], %[rseq_scratch1]\n\t"
+			"ldr %[src], %[rseq_scratch0]\n\t",
+			cmpfail)
+		"6:\n\t"
+		: /* gcc asm goto does not allow outputs */
+		: [cpu_id]"r"(cpu),
+		  [current_cpu_id]"m"(__rseq_abi.cpu_id),
+		  [rseq_cs]"r"(&__rseq_abi.rseq_cs),
+		  /* final store input */
+		  [v]"m"(*v),
+		  [expect]"r"(expect),
+		  [newv]"r"(newv),
+		  /* try memcpy input */
+		  [dst]"r"(dst),
+		  [src]"r"(src),
+		  [len]"r"(len),
+		  [rseq_scratch0]"m"(rseq_scratch[0]),
+		  [rseq_scratch1]"m"(rseq_scratch[1]),
+		  [rseq_scratch2]"m"(rseq_scratch[2])
+		  RSEQ_INJECT_INPUT
+		: "r0", "memory", "cc"
+		  RSEQ_INJECT_CLOBBER
+		: abort, cmpfail
+	);
+	return 0;
+abort:
+	RSEQ_INJECT_FAILED
+	return -1;
+cmpfail:
+	return 1;
+}
+
+static inline __attribute__((always_inline))
+int rseq_cmpeqv_trymemcpy_storev_release(intptr_t *v, intptr_t expect,
+		void *dst, void *src, size_t len, intptr_t newv,
+		int cpu)
+{
+	uint32_t rseq_scratch[3];
+
+	RSEQ_INJECT_C(9)
+
+	__asm__ __volatile__ goto (
+		RSEQ_ASM_DEFINE_TABLE(__rseq_table, 0x0, 0x0, 1f, 2f-1f, 4f)
+		"str %[src], %[rseq_scratch0]\n\t"
+		"str %[dst], %[rseq_scratch1]\n\t"
+		"str %[len], %[rseq_scratch2]\n\t"
+		RSEQ_ASM_STORE_RSEQ_CS(1, 3f, rseq_cs)
+		RSEQ_ASM_CMP_CPU_ID(cpu_id, current_cpu_id, 4f)
+		RSEQ_INJECT_ASM(3)
+		"ldr r0, %[v]\n\t"
+		"cmp %[expect], r0\n\t"
+		"bne 5f\n\t"
 		RSEQ_INJECT_ASM(4)
-
-#define RSEQ_FINISH_MEMCPY_STORE_INPUT(_target_memcpy, _to_write_memcpy, _len_memcpy) \
-		, [to_write_memcpy]"r"(_to_write_memcpy), \
-		[target_memcpy]"r"(_target_memcpy), \
-		[len_memcpy]"r"(_len_memcpy), \
-		[rseq_scratch0]"m"(rseq_scratch[0]), \
-		[rseq_scratch1]"m"(rseq_scratch[1]), \
-		[rseq_scratch2]"m"(rseq_scratch[2])
-
-/* We can use r0. */
-#define RSEQ_FINISH_MEMCPY_CLOBBER()
-
-#define RSEQ_FINISH_MEMCPY_SCRATCH() \
-		uint32_t rseq_scratch[3];
-
-/*
- * We need to save and restore those input registers so they can be
- * modified within the assembly.
- */
-#define RSEQ_FINISH_MEMCPY_SETUP() \
-		"str %[to_write_memcpy], %[rseq_scratch0]\n\t" \
-		"str %[target_memcpy], %[rseq_scratch1]\n\t" \
-		"str %[len_memcpy], %[rseq_scratch2]\n\t"
-
-#define RSEQ_FINISH_MEMCPY_TEARDOWN() \
-		"ldr %[len_memcpy], %[rseq_scratch2]\n\t" \
-		"ldr %[target_memcpy], %[rseq_scratch1]\n\t" \
-		"ldr %[to_write_memcpy], %[rseq_scratch0]\n\t"
+		/* try memcpy */
+		"cmp %[len], #0\n\t" \
+		"beq 333f\n\t" \
+		"222:\n\t" \
+		"ldrb %%r0, [%[src]]\n\t" \
+		"strb %%r0, [%[dst]]\n\t" \
+		"adds %[src], #1\n\t" \
+		"adds %[dst], #1\n\t" \
+		"subs %[len], #1\n\t" \
+		"bne 222b\n\t" \
+		"333:\n\t" \
+		RSEQ_INJECT_ASM(5)
+		"dmb\n\t"	/* full mb provides store-release */
+		/* final store */
+		"str %[newv], %[v]\n\t"
+		"2:\n\t"
+		RSEQ_INJECT_ASM(6)
+		/* teardown */
+		"ldr %[len], %[rseq_scratch2]\n\t"
+		"ldr %[dst], %[rseq_scratch1]\n\t"
+		"ldr %[src], %[rseq_scratch0]\n\t"
+		"b 6f\n\t"
+		RSEQ_ASM_DEFINE_ABORT(3, 4, __rseq_failure, RSEQ_SIG,
+			/* teardown */
+			"ldr %[len], %[rseq_scratch2]\n\t"
+			"ldr %[dst], %[rseq_scratch1]\n\t"
+			"ldr %[src], %[rseq_scratch0]\n\t",
+			abort, 0x0, 0x0, 1b, 2b-1b, 4f)
+		RSEQ_ASM_DEFINE_CMPFAIL(5, __rseq_failure,
+			/* teardown */
+			"ldr %[len], %[rseq_scratch2]\n\t"
+			"ldr %[dst], %[rseq_scratch1]\n\t"
+			"ldr %[src], %[rseq_scratch0]\n\t",
+			cmpfail)
+		"6:\n\t"
+		: /* gcc asm goto does not allow outputs */
+		: [cpu_id]"r"(cpu),
+		  [current_cpu_id]"m"(__rseq_abi.cpu_id),
+		  [rseq_cs]"r"(&__rseq_abi.rseq_cs),
+		  /* final store input */
+		  [v]"m"(*v),
+		  [expect]"r"(expect),
+		  [newv]"r"(newv),
+		  /* try memcpy input */
+		  [dst]"r"(dst),
+		  [src]"r"(src),
+		  [len]"r"(len),
+		  [rseq_scratch0]"m"(rseq_scratch[0]),
+		  [rseq_scratch1]"m"(rseq_scratch[1]),
+		  [rseq_scratch2]"m"(rseq_scratch[2])
+		  RSEQ_INJECT_INPUT
+		: "r0", "memory", "cc"
+		  RSEQ_INJECT_CLOBBER
+		: abort, cmpfail
+	);
+	return 0;
+abort:
+	RSEQ_INJECT_FAILED
+	return -1;
+cmpfail:
+	return 1;
+}

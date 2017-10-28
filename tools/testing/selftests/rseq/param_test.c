@@ -12,6 +12,7 @@
 #include <sys/types.h>
 #include <signal.h>
 #include <errno.h>
+#include <stddef.h>
 
 #include "cpu-op.h"
 
@@ -27,13 +28,15 @@ static int opt_modulo, quiet;
 
 static int opt_yield, opt_signal, opt_sleep,
 		opt_disable_rseq, opt_threads = 200,
-		opt_reps = 5000, opt_disable_mod = 0, opt_test = 's';
+		opt_disable_mod = 0, opt_test = 's', opt_mb = 0;
+
+static long long opt_reps = 5000;
 
 static __thread __attribute__((tls_model("initial-exec"))) unsigned int signals_delivered;
 
 #ifndef BENCHMARK
 
-static __thread __attribute__((tls_model("initial-exec"))) unsigned int yield_mod_cnt, nr_retry;
+static __thread __attribute__((tls_model("initial-exec"))) unsigned int yield_mod_cnt, nr_abort;
 
 #define printf_verbose(fmt, ...)			\
 	do {						\
@@ -46,7 +49,8 @@ static __thread __attribute__((tls_model("initial-exec"))) unsigned int yield_mo
 	, [loop_cnt_2]"m"(loop_cnt[2]) \
 	, [loop_cnt_3]"m"(loop_cnt[3]) \
 	, [loop_cnt_4]"m"(loop_cnt[4]) \
-	, [loop_cnt_5]"m"(loop_cnt[5])
+	, [loop_cnt_5]"m"(loop_cnt[5]) \
+	, [loop_cnt_6]"m"(loop_cnt[6])
 
 #if defined(__x86_64__) || defined(__i386__)
 
@@ -99,7 +103,7 @@ static __thread __attribute__((tls_model("initial-exec"))) unsigned int yield_mo
 #endif
 
 #define RSEQ_INJECT_FAILED \
-	nr_retry++;
+	nr_abort++;
 
 #define RSEQ_INJECT_C(n) \
 { \
@@ -150,7 +154,7 @@ struct spinlock_test_data {
 
 struct spinlock_thread_test_data {
 	struct spinlock_test_data *data;
-	int reps;
+	long long reps;
 	int reg;
 };
 
@@ -160,7 +164,7 @@ struct inc_test_data {
 
 struct inc_thread_test_data {
 	struct inc_test_data *data;
-	int reps;
+	long long reps;
 	int reg;
 };
 
@@ -216,39 +220,34 @@ static int rseq_percpu_lock(struct percpu_lock *lock)
 	int cpu;
 
 	for (;;) {
-#ifndef SKIP_FASTPATH
-		struct rseq_state rseq_state;
+		int ret;
 
+#ifndef SKIP_FASTPATH
 		/* Try fast path. */
-		rseq_state = rseq_start();
-		cpu = rseq_cpu_at_start(rseq_state);
+		cpu = rseq_current_cpu_raw();
 		if (unlikely(cpu < 0))
 			goto slowpath;
-		if (unlikely(lock->c[cpu].v != 0))
-			continue;	/* Retry.*/
-		if (likely(rseq_finish(&lock->c[cpu].v, 1, rseq_state)))
+		ret = rseq_cmpeqv_storev(&lock->c[cpu].v,
+				0, 1, cpu);
+		if (likely(!ret))
 			break;
+		if (ret > 0)
+			continue;	/* Retry. */
 #endif
-		{
-		slowpath:
-			__attribute__((unused));
-			/* Fallback on cpu_opv system call. */
-			intptr_t expect = 0, n = 1;
-			int ret;
-
-			cpu = rseq_current_cpu();
-			ret = cpu_op_cmpstore(&lock->c[cpu].v, &expect, &n,
-				sizeof(intptr_t), cpu);
-			if (likely(!ret))
-				break;
-			assert(ret >= 0 || errno == EAGAIN);
-		}
+	slowpath:
+		__attribute__((unused));
+		/* Fallback on cpu_opv system call. */
+		cpu = rseq_current_cpu();
+		ret = cpu_op_cmpeqv_storev(&lock->c[cpu].v, 0, 1, cpu);
+		if (likely(!ret))
+			break;
+		assert(ret >= 0 || errno == EAGAIN);
 	}
 	/*
 	 * Acquire semantic when taking lock after control dependency.
-	 * Matches smp_store_release().
+	 * Matches rseq_smp_store_release().
 	 */
-	smp_acquire__after_ctrl_dep();
+	rseq_smp_acquire__after_ctrl_dep();
 	return cpu;
 }
 
@@ -257,31 +256,33 @@ static void rseq_percpu_unlock(struct percpu_lock *lock, int cpu)
 	assert(lock->c[cpu].v == 1);
 	/*
 	 * Release lock, with release semantic. Matches
-	 * smp_acquire__after_ctrl_dep().
+	 * rseq_smp_acquire__after_ctrl_dep().
 	 */
-	smp_store_release(&lock->c[cpu].v, 0);
+	rseq_smp_store_release(&lock->c[cpu].v, 0);
 }
 
 void *test_percpu_spinlock_thread(void *arg)
 {
 	struct spinlock_thread_test_data *thread_data = arg;
 	struct spinlock_test_data *data = thread_data->data;
-	int i, cpu;
+	int cpu;
+	long long i, reps;
 
 	if (!opt_disable_rseq && thread_data->reg
 			&& rseq_register_current_thread())
 		abort();
-	for (i = 0; i < thread_data->reps; i++) {
+	reps = thread_data->reps;
+	for (i = 0; i < reps; i++) {
 		cpu = rseq_percpu_lock(&data->lock);
 		data->c[cpu].count++;
 		rseq_percpu_unlock(&data->lock, cpu);
 #ifndef BENCHMARK
-		if (i != 0 && !(i % (thread_data->reps / 10)))
-			printf_verbose("tid %d: count %d\n", (int) gettid(), i);
+		if (i != 0 && !(i % (reps / 10)))
+			printf_verbose("tid %d: count %lld\n", (int) gettid(), i);
 #endif
 	}
-	printf_verbose("tid %d: number of retry: %d, signals delivered: %u\n",
-		(int) gettid(), nr_retry, signals_delivered);
+	printf_verbose("tid %d: number of rseq abort: %d, signals delivered: %u\n",
+		(int) gettid(), nr_abort, signals_delivered);
 	if (!opt_disable_rseq && thread_data->reg
 			&& rseq_unregister_current_thread())
 		abort();
@@ -340,50 +341,43 @@ void *test_percpu_inc_thread(void *arg)
 {
 	struct inc_thread_test_data *thread_data = arg;
 	struct inc_test_data *data = thread_data->data;
-	int i;
+	long long i, reps;
 
 	if (!opt_disable_rseq && thread_data->reg
 			&& rseq_register_current_thread())
 		abort();
-	for (i = 0; i < thread_data->reps; i++) {
-		int cpu;
+	reps = thread_data->reps;
+	for (i = 0; i < reps; i++) {
+		int cpu, ret;
 
 #ifndef SKIP_FASTPATH
-		struct rseq_state rseq_state;
-		intptr_t *targetptr, newval;
-
 		/* Try fast path. */
-		rseq_state = rseq_start();
-		cpu = rseq_cpu_at_start(rseq_state);
+		cpu = rseq_current_cpu_raw();
 		if (unlikely(cpu < 0))
 			goto slowpath;
-		newval = (intptr_t)data->c[cpu].count + 1;
-		targetptr = (intptr_t *)&data->c[cpu].count;
-		if (unlikely(!rseq_finish(targetptr, newval, rseq_state)))
+		ret = rseq_addv(&data->c[cpu].count, 1, cpu);
+		if (likely(!ret))
+			goto next;
 #endif
-		{
-		slowpath:
-			__attribute__((unused));
-			for (;;) {
-				/* Fallback on cpu_opv system call. */
-				int ret;
-
-				cpu = rseq_current_cpu();
-				ret = cpu_op_add(&data->c[cpu].count, 1,
-					sizeof(intptr_t), cpu);
-				if (likely(!ret))
-					break;
-				assert(ret >= 0 || errno == EAGAIN);
-			}
+	slowpath:
+		__attribute__((unused));
+		for (;;) {
+			/* Fallback on cpu_opv system call. */
+			cpu = rseq_current_cpu();
+			ret = cpu_op_addv(&data->c[cpu].count, 1, cpu);
+			if (likely(!ret))
+				break;
+			assert(ret >= 0 || errno == EAGAIN);
 		}
-
+	next:
+		__attribute__((unused));
 #ifndef BENCHMARK
-		if (i != 0 && !(i % (thread_data->reps / 10)))
-			printf_verbose("tid %d: count %d\n", (int) gettid(), i);
+		if (i != 0 && !(i % (reps / 10)))
+			printf_verbose("tid %d: count %lld\n", (int) gettid(), i);
 #endif
 	}
-	printf_verbose("tid %d: number of retry: %d, signals delivered: %u\n",
-		(int) gettid(), nr_retry, signals_delivered);
+	printf_verbose("tid %d: number of rseq abort: %d, signals delivered: %u\n",
+		(int) gettid(), nr_abort, signals_delivered);
 	if (!opt_disable_rseq && thread_data->reg
 			&& rseq_unregister_current_thread())
 		abort();
@@ -435,39 +429,36 @@ void test_percpu_inc(void)
 int percpu_list_push(struct percpu_list *list, struct percpu_list_node *node)
 {
 	intptr_t *targetptr, newval, expect;
-	int cpu;
-#ifndef SKIP_FASTPATH
-	struct rseq_state rseq_state;
+	int cpu, ret;
 
+#ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	rseq_state = rseq_start();
-	cpu = rseq_cpu_at_start(rseq_state);
+	cpu = rseq_current_cpu_raw();
 	if (unlikely(cpu < 0))
 		goto slowpath;
+	/* Load list->c[cpu].head with single-copy atomicity. */
+	expect = (intptr_t)READ_ONCE(list->c[cpu].head);
 	newval = (intptr_t)node;
 	targetptr = (intptr_t *)&list->c[cpu].head;
-	node->next = list->c[cpu].head;
-	if (unlikely(!rseq_finish(targetptr, newval, rseq_state)))
+	node->next = (struct percpu_list_node *)expect;
+	ret = rseq_cmpeqv_storev(targetptr, expect, newval, cpu);
+	if (likely(!ret))
+		return cpu;
 #endif
-	{
-	slowpath:
-		__attribute__((unused));
-		/* Fallback on cpu_opv system call. */
-		for (;;) {
-			int ret;
-
-			cpu = rseq_current_cpu();
-			/* Load list->c[cpu].head with single-copy atomicity. */
-			expect = (intptr_t)READ_ONCE(list->c[cpu].head);
-			newval = (intptr_t)node;
-			targetptr = (intptr_t *)&list->c[cpu].head;
-			node->next = (struct percpu_list_node *)expect;
-			ret = cpu_op_cmpstore(targetptr, &expect, &newval,
-				sizeof(intptr_t), cpu);
-			if (likely(!ret))
-				break;
-			assert(ret >= 0 || errno == EAGAIN);
-		}
+	/* Fallback on cpu_opv system call. */
+slowpath:
+	__attribute__((unused));
+	for (;;) {
+		cpu = rseq_current_cpu();
+		/* Load list->c[cpu].head with single-copy atomicity. */
+		expect = (intptr_t)READ_ONCE(list->c[cpu].head);
+		newval = (intptr_t)node;
+		targetptr = (intptr_t *)&list->c[cpu].head;
+		node->next = (struct percpu_list_node *)expect;
+		ret = cpu_op_cmpeqv_storev(targetptr, expect, newval, cpu);
+		if (likely(!ret))
+			break;
+		assert(ret >= 0 || errno == EAGAIN);
 	}
 	return cpu;
 }
@@ -479,65 +470,52 @@ int percpu_list_push(struct percpu_list *list, struct percpu_list_node *node)
  */
 struct percpu_list_node *percpu_list_pop(struct percpu_list *list)
 {
-	struct percpu_list_node *head, *next;
-	intptr_t *targetptr, newval, expect;
-	int cpu;
-#ifndef SKIP_FASTPATH
-	struct rseq_state rseq_state;
+	struct percpu_list_node *head;
+	int cpu, ret;
 
+#ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	rseq_state = rseq_start();
-	cpu = rseq_cpu_at_start(rseq_state);
+	cpu = rseq_current_cpu_raw();
 	if (unlikely(cpu < 0))
 		goto slowpath;
-	/* Load list->c[cpu].head with single-copy atomicity. */
-	head = READ_ONCE(list->c[cpu].head);
-	if (!head)
+	ret = rseq_cmpnev_storeoffp_load((intptr_t *)&list->c[cpu].head,
+		(intptr_t)NULL,
+		offsetof(struct percpu_list_node, next),
+		(intptr_t *)&head, cpu);
+	if (likely(!ret))
+		return head;
+	if (ret > 0)
 		return NULL;
-	/* Load head->next with single-copy atomicity. */
-	next = READ_ONCE(head->next);
-	newval = (intptr_t)next;
-	targetptr = (intptr_t *)&list->c[cpu].head;
-	if (unlikely(!rseq_finish(targetptr, newval, rseq_state)))
 #endif
-	{
+	/* Fallback on cpu_opv system call. */
 	slowpath:
 		__attribute__((unused));
-		/* Fallback on cpu_opv system call. */
-		for (;;) {
-			int ret;
-
-			cpu = rseq_current_cpu();
-			/* Load list->c[cpu].head with single-copy atomicity. */
-			head = READ_ONCE(list->c[cpu].head);
-			if (!head)
-				return NULL;
-			expect = (intptr_t)head;
-			/* Load head->next with single-copy atomicity. */
-			next = READ_ONCE(head->next);
-			newval = (intptr_t)next;
-			targetptr = (intptr_t *)&list->c[cpu].head;
-			ret = cpu_op_2cmp1store(targetptr, &expect, &newval,
-				&head->next, &next,
-				sizeof(intptr_t), cpu);
-			if (likely(!ret))
-				break;
-			assert(ret >= 0 || errno == EAGAIN);
-		}
+	for (;;) {
+		cpu = rseq_current_cpu();
+		ret = cpu_op_cmpnev_storeoffp_load(
+			(intptr_t *)&list->c[cpu].head,
+			(intptr_t)NULL,
+			offsetof(struct percpu_list_node, next),
+			(intptr_t *)&head, cpu);
+		if (likely(!ret))
+			break;
+		if (ret > 0)
+			return NULL;
+		assert(ret >= 0 || errno == EAGAIN);
 	}
-
 	return head;
 }
 
 void *test_percpu_list_thread(void *arg)
 {
-	int i;
+	long long i, reps;
 	struct percpu_list *list = (struct percpu_list *)arg;
 
 	if (!opt_disable_rseq && rseq_register_current_thread())
 		abort();
 
-	for (i = 0; i < opt_reps; i++) {
+	reps = opt_reps;
+	for (i = 0; i < reps; i++) {
 		struct percpu_list_node *node = percpu_list_pop(list);
 
 		if (opt_yield)
@@ -546,6 +524,8 @@ void *test_percpu_list_thread(void *arg)
 			percpu_list_push(list, node);
 	}
 
+	printf_verbose("tid %d: number of rseq abort: %d, signals delivered: %u\n",
+		(int) gettid(), nr_abort, signals_delivered);
 	if (!opt_disable_rseq && rseq_unregister_current_thread())
 		abort();
 
@@ -631,14 +611,12 @@ bool percpu_buffer_push(struct percpu_buffer *buffer,
 {
 	intptr_t *targetptr_spec, newval_spec;
 	intptr_t *targetptr_final, newval_final;
-	int cpu;
+	int cpu, ret;
 	intptr_t offset;
-#ifndef SKIP_FASTPATH
-	struct rseq_state rseq_state;
 
+#ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	rseq_state = rseq_start();
-	cpu = rseq_cpu_at_start(rseq_state);
+	cpu = rseq_current_cpu_raw();
 	if (unlikely(cpu < 0))
 		goto slowpath;
 	/* Load offset with single-copy atomicity. */
@@ -649,32 +627,41 @@ bool percpu_buffer_push(struct percpu_buffer *buffer,
 	targetptr_spec = (intptr_t *)&buffer->c[cpu].array[offset];
 	newval_final = offset + 1;
 	targetptr_final = &buffer->c[cpu].offset;
-	if (unlikely(!rseq_finish2(targetptr_spec, newval_spec,
-			targetptr_final, newval_final, rseq_state)))
+	if (opt_mb)
+		ret = rseq_cmpeqv_trystorev_storev_release(targetptr_final,
+			offset, targetptr_spec, newval_spec,
+			newval_final, cpu);
+	else
+		ret = rseq_cmpeqv_trystorev_storev(targetptr_final,
+			offset, targetptr_spec, newval_spec,
+			newval_final, cpu);
+	if (likely(!ret))
+		return true;
 #endif
-	{
-	slowpath:
-		__attribute__((unused));
-		/* Fallback on cpu_opv system call. */
-		for (;;) {
-			int ret;
-
-			cpu = rseq_current_cpu();
-			/* Load offset with single-copy atomicity. */
-			offset = READ_ONCE(buffer->c[cpu].offset);
-			if (offset == buffer->c[cpu].buflen)
-				return false;
-			newval_spec = (intptr_t)node;
-			targetptr_spec = (intptr_t *)&buffer->c[cpu].array[offset];
-			newval_final = offset + 1;
-			targetptr_final = &buffer->c[cpu].offset;
-			ret = cpu_op_1cmp2store(targetptr_final, &offset, &newval_final,
-				targetptr_spec, &newval_spec,
-				sizeof(intptr_t), cpu);
-			if (likely(!ret))
-				break;
-			assert(ret >= 0 || errno == EAGAIN);
-		}
+slowpath:
+	__attribute__((unused));
+	/* Fallback on cpu_opv system call. */
+	for (;;) {
+		cpu = rseq_current_cpu();
+		/* Load offset with single-copy atomicity. */
+		offset = READ_ONCE(buffer->c[cpu].offset);
+		if (offset == buffer->c[cpu].buflen)
+			return false;
+		newval_spec = (intptr_t)node;
+		targetptr_spec = (intptr_t *)&buffer->c[cpu].array[offset];
+		newval_final = offset + 1;
+		targetptr_final = &buffer->c[cpu].offset;
+		if (opt_mb)
+			ret = cpu_op_cmpeqv_storev_mb_storev(targetptr_final,
+				offset, targetptr_spec, newval_spec,
+				newval_final, cpu);
+		else
+			ret = cpu_op_cmpeqv_storev_storev(targetptr_final,
+				offset, targetptr_spec, newval_spec,
+				newval_final, cpu);
+		if (likely(!ret))
+			break;
+		assert(ret >= 0 || errno == EAGAIN);
 	}
 	return true;
 }
@@ -683,14 +670,12 @@ struct percpu_buffer_node *percpu_buffer_pop(struct percpu_buffer *buffer)
 {
 	struct percpu_buffer_node *head;
 	intptr_t *targetptr, newval;
-	int cpu;
+	int cpu, ret;
 	intptr_t offset;
-#ifndef SKIP_FASTPATH
-	struct rseq_state rseq_state;
 
+#ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	rseq_state = rseq_start();
-	cpu = rseq_cpu_at_start(rseq_state);
+	cpu = rseq_current_cpu_raw();
 	if (unlikely(cpu < 0))
 		goto slowpath;
 	/* Load offset with single-copy atomicity. */
@@ -700,43 +685,44 @@ struct percpu_buffer_node *percpu_buffer_pop(struct percpu_buffer *buffer)
 	head = buffer->c[cpu].array[offset - 1];
 	newval = offset - 1;
 	targetptr = (intptr_t *)&buffer->c[cpu].offset;
-	if (unlikely(!rseq_finish(targetptr, newval, rseq_state)))
+	ret = rseq_cmpeqv_cmpeqv_storev(targetptr, offset,
+		(intptr_t *)&buffer->c[cpu].array[offset - 1], (intptr_t)head,
+		newval, cpu);
+	if (likely(!ret))
+		return head;
 #endif
-	{
-	slowpath:
-		__attribute__((unused));
-		/* Fallback on cpu_opv system call. */
-		for (;;) {
-			int ret;
-
-			cpu = rseq_current_cpu();
-			/* Load offset with single-copy atomicity. */
-			offset = READ_ONCE(buffer->c[cpu].offset);
-			if (offset == 0)
-				return NULL;
-			head = buffer->c[cpu].array[offset - 1];
-			newval = offset - 1;
-			targetptr = (intptr_t *)&buffer->c[cpu].offset;
-			ret = cpu_op_2cmp1store(targetptr, &offset, &newval,
-				&buffer->c[cpu].array[offset - 1], &head,
-				sizeof(intptr_t), cpu);
-			if (likely(!ret))
-				break;
-			assert(ret >= 0 || errno == EAGAIN);
-		}
+slowpath:
+	__attribute__((unused));
+	/* Fallback on cpu_opv system call. */
+	for (;;) {
+		cpu = rseq_current_cpu();
+		/* Load offset with single-copy atomicity. */
+		offset = READ_ONCE(buffer->c[cpu].offset);
+		if (offset == 0)
+			return NULL;
+		head = buffer->c[cpu].array[offset - 1];
+		newval = offset - 1;
+		targetptr = (intptr_t *)&buffer->c[cpu].offset;
+		ret = cpu_op_cmpeqv_cmpeqv_storev(targetptr, offset,
+			(intptr_t *)&buffer->c[cpu].array[offset - 1],
+			(intptr_t)head, newval, cpu);
+		if (likely(!ret))
+			break;
+		assert(ret >= 0 || errno == EAGAIN);
 	}
 	return head;
 }
 
 void *test_percpu_buffer_thread(void *arg)
 {
-	int i;
+	long long i, reps;
 	struct percpu_buffer *buffer = (struct percpu_buffer *)arg;
 
 	if (!opt_disable_rseq && rseq_register_current_thread())
 		abort();
 
-	for (i = 0; i < opt_reps; i++) {
+	reps = opt_reps;
+	for (i = 0; i < reps; i++) {
 		struct percpu_buffer_node *node = percpu_buffer_pop(buffer);
 
 		if (opt_yield)
@@ -749,6 +735,8 @@ void *test_percpu_buffer_thread(void *arg)
 		}
 	}
 
+	printf_verbose("tid %d: number of rseq abort: %d, signals delivered: %u\n",
+		(int) gettid(), nr_abort, signals_delivered);
 	if (!opt_disable_rseq && rseq_unregister_current_thread())
 		abort();
 
@@ -849,14 +837,12 @@ bool percpu_memcpy_buffer_push(struct percpu_memcpy_buffer *buffer,
 	char *destptr, *srcptr;
 	size_t copylen;
 	intptr_t *targetptr_final, newval_final;
-	int cpu;
+	int cpu, ret;
 	intptr_t offset;
-#ifndef SKIP_FASTPATH
-	struct rseq_state rseq_state;
 
+#ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	rseq_state = rseq_start();
-	cpu = rseq_cpu_at_start(rseq_state);
+	cpu = rseq_current_cpu_raw();
 	if (unlikely(cpu < 0))
 		goto slowpath;
 	/* Load offset with single-copy atomicity. */
@@ -868,33 +854,43 @@ bool percpu_memcpy_buffer_push(struct percpu_memcpy_buffer *buffer,
 	copylen = sizeof(item);
 	newval_final = offset + 1;
 	targetptr_final = &buffer->c[cpu].offset;
-	if (unlikely(!rseq_finish_memcpy(destptr, srcptr, copylen,
-			targetptr_final, newval_final, rseq_state)))
+	if (opt_mb)
+		ret = rseq_cmpeqv_trymemcpy_storev_release(targetptr_final,
+			offset, destptr, srcptr, copylen,
+			newval_final, cpu);
+	else
+		ret = rseq_cmpeqv_trymemcpy_storev(targetptr_final,
+			offset, destptr, srcptr, copylen,
+			newval_final, cpu);
+	if (likely(!ret))
+		return true;
 #endif
-	{
-	slowpath:
-		__attribute__((unused));
-		/* Fallback on cpu_opv system call. */
-		for (;;) {
-			int ret;
-
-			cpu = rseq_current_cpu();
-			/* Load offset with single-copy atomicity. */
-			offset = READ_ONCE(buffer->c[cpu].offset);
-			if (offset == buffer->c[cpu].buflen)
-				return false;
-			destptr = (char *)&buffer->c[cpu].array[offset];
-			srcptr = (char *)&item;
-			copylen = sizeof(item);
-			newval_final = offset + 1;
-			targetptr_final = &buffer->c[cpu].offset;
-			/* copylen must be <= PAGE_SIZE. */
-			ret = cpu_op_cmpstorememcpy(targetptr_final, &offset, &newval_final,
-				sizeof(intptr_t), destptr, srcptr, copylen, cpu);
-			if (likely(!ret))
-				break;
-			assert(ret >= 0 || errno == EAGAIN);
-		}
+slowpath:
+	__attribute__((unused));
+	/* Fallback on cpu_opv system call. */
+	for (;;) {
+		cpu = rseq_current_cpu();
+		/* Load offset with single-copy atomicity. */
+		offset = READ_ONCE(buffer->c[cpu].offset);
+		if (offset == buffer->c[cpu].buflen)
+			return false;
+		destptr = (char *)&buffer->c[cpu].array[offset];
+		srcptr = (char *)&item;
+		copylen = sizeof(item);
+		newval_final = offset + 1;
+		targetptr_final = &buffer->c[cpu].offset;
+		/* copylen must be <= PAGE_SIZE. */
+		if (opt_mb)
+			ret = cpu_op_cmpeqv_memcpy_mb_storev(targetptr_final,
+				offset, destptr, srcptr, copylen,
+				newval_final, cpu);
+		else
+			ret = cpu_op_cmpeqv_memcpy_storev(targetptr_final,
+				offset, destptr, srcptr, copylen,
+				newval_final, cpu);
+		if (likely(!ret))
+			break;
+		assert(ret >= 0 || errno == EAGAIN);
 	}
 	return true;
 }
@@ -905,14 +901,12 @@ bool percpu_memcpy_buffer_pop(struct percpu_memcpy_buffer *buffer,
 	char *destptr, *srcptr;
 	size_t copylen;
 	intptr_t *targetptr_final, newval_final;
-	int cpu;
+	int cpu, ret;
 	intptr_t offset;
-#ifndef SKIP_FASTPATH
-	struct rseq_state rseq_state;
 
+#ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	rseq_state = rseq_start();
-	cpu = rseq_cpu_at_start(rseq_state);
+	cpu = rseq_current_cpu_raw();
 	if (unlikely(cpu < 0))
 		goto slowpath;
 	/* Load offset with single-copy atomicity. */
@@ -924,46 +918,47 @@ bool percpu_memcpy_buffer_pop(struct percpu_memcpy_buffer *buffer,
 	copylen = sizeof(*item);
 	newval_final = offset - 1;
 	targetptr_final = &buffer->c[cpu].offset;
-	if (unlikely(!rseq_finish_memcpy(destptr, srcptr, copylen,
-			targetptr_final, newval_final, rseq_state)))
+	ret = rseq_cmpeqv_trymemcpy_storev(targetptr_final,
+		offset, destptr, srcptr, copylen,
+		newval_final, cpu);
+	if (likely(!ret))
+		return true;
 #endif
-	{
-	slowpath:
-		__attribute__((unused));
-		/* Fallback on cpu_opv system call. */
-		for (;;) {
-			int ret;
-
-			cpu = rseq_current_cpu();
-			/* Load offset with single-copy atomicity. */
-			offset = READ_ONCE(buffer->c[cpu].offset);
-			if (offset == 0)
-				return false;
-			destptr = (char *)item;
-			srcptr = (char *)&buffer->c[cpu].array[offset - 1];
-			copylen = sizeof(*item);
-			newval_final = offset - 1;
-			targetptr_final = &buffer->c[cpu].offset;
-			/* copylen must be <= PAGE_SIZE. */
-			ret = cpu_op_cmpstorememcpy(targetptr_final, &offset, &newval_final,
-				sizeof(intptr_t), destptr, srcptr, copylen, cpu);
-			if (likely(!ret))
-				break;
-			assert(ret >= 0 || errno == EAGAIN);
-		}
+slowpath:
+	__attribute__((unused));
+	/* Fallback on cpu_opv system call. */
+	for (;;) {
+		cpu = rseq_current_cpu();
+		/* Load offset with single-copy atomicity. */
+		offset = READ_ONCE(buffer->c[cpu].offset);
+		if (offset == 0)
+			return false;
+		destptr = (char *)item;
+		srcptr = (char *)&buffer->c[cpu].array[offset - 1];
+		copylen = sizeof(*item);
+		newval_final = offset - 1;
+		targetptr_final = &buffer->c[cpu].offset;
+		/* copylen must be <= PAGE_SIZE. */
+		ret = cpu_op_cmpeqv_memcpy_storev(targetptr_final,
+			offset, destptr, srcptr, copylen,
+			newval_final, cpu);
+		if (likely(!ret))
+			break;
+		assert(ret >= 0 || errno == EAGAIN);
 	}
 	return true;
 }
 
 void *test_percpu_memcpy_buffer_thread(void *arg)
 {
-	int i;
+	long long i, reps;
 	struct percpu_memcpy_buffer *buffer = (struct percpu_memcpy_buffer *)arg;
 
 	if (!opt_disable_rseq && rseq_register_current_thread())
 		abort();
 
-	for (i = 0; i < opt_reps; i++) {
+	reps = opt_reps;
+	for (i = 0; i < reps; i++) {
 		struct percpu_memcpy_buffer_node item;
 		bool result;
 
@@ -978,6 +973,8 @@ void *test_percpu_memcpy_buffer_thread(void *arg)
 		}
 	}
 
+	printf_verbose("tid %d: number of rseq abort: %d, signals delivered: %u\n",
+		(int) gettid(), nr_abort, signals_delivered);
 	if (!opt_disable_rseq && rseq_unregister_current_thread())
 		abort();
 
@@ -1109,7 +1106,7 @@ static void show_usage(int argc, char **argv)
 	printf("	[-3 loops] Number of loops for delay injection 3\n");
 	printf("	[-4 loops] Number of loops for delay injection 4\n");
 	printf("	[-5 loops] Number of loops for delay injection 5\n");
-	printf("	[-6 loops] Number of loops for delay injection 6 (-1 to enable -m)\n");
+	printf("	[-6 loops] Number of loops for delay injection 6\n");
 	printf("	[-7 loops] Number of loops for delay injection 7 (-1 to enable -m)\n");
 	printf("	[-8 loops] Number of loops for delay injection 8 (-1 to enable -m)\n");
 	printf("	[-9 loops] Number of loops for delay injection 9 (-1 to enable -m)\n");
@@ -1122,6 +1119,7 @@ static void show_usage(int argc, char **argv)
 	printf("	[-d] Disable rseq system call (no initialization)\n");
 	printf("	[-D M] Disable rseq for each M threads\n");
 	printf("	[-T test] Choose test: (s)pinlock, (l)ist, (b)uffer, (m)emcpy, (i)ncrement\n");
+	printf("	[-M] Push into buffer and memcpy buffer with memory barriers.\n");
 	printf("	[-q] Quiet output.\n");
 	printf("	[-h] Show this help.\n");
 	printf("\n");
@@ -1213,7 +1211,7 @@ int main(int argc, char **argv)
 				show_usage(argc, argv);
 				goto error;
 			}
-			opt_reps = atol(argv[i + 1]);
+			opt_reps = atoll(argv[i + 1]);
 			if (opt_reps < 0) {
 				show_usage(argc, argv);
 				goto error;
@@ -1244,6 +1242,9 @@ int main(int argc, char **argv)
 			break;
 		case 'q':
 			quiet = 1;
+			break;
+		case 'M':
+			opt_mb = 1;
 			break;
 		default:
 			show_usage(argc, argv);

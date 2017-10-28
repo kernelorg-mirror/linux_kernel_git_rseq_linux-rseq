@@ -31,7 +31,7 @@
 
 __attribute__((tls_model("initial-exec"))) __thread
 volatile struct rseq __rseq_abi = {
-	.u.e.cpu_id = -1,
+	.cpu_id = -1,
 };
 
 static int sys_rseq(volatile struct rseq *rseq_abi, uint32_t rseq_len,
@@ -49,7 +49,7 @@ int rseq_register_current_thread(void)
 		if (errno != EBUSY) {
 			fprintf(stderr, "Error: sys_rseq(...) failed(%d): %s\n",
 				errno, strerror(errno));
-			__rseq_abi.u.e.cpu_id = -2;
+			__rseq_abi.cpu_id = -2;
 		}
 		return -1;
 	}

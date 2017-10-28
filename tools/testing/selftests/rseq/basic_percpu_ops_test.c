@@ -6,6 +6,7 @@
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
+#include <stddef.h>
 
 #include "rseq.h"
 #include "cpu-op.h"
@@ -49,30 +50,34 @@ int rseq_percpu_lock(struct percpu_lock *lock)
 	int cpu;
 
 	for (;;) {
-		struct rseq_state rseq_state;
-		intptr_t expect = 0, n = 1;
 		int ret;
 
+#ifndef SKIP_FASTPATH
 		/* Try fast path. */
-		rseq_state = rseq_start();
-		cpu = rseq_cpu_at_start(rseq_state);
-		if (unlikely(lock->c[cpu].v != 0))
-			continue;	/* Retry.*/
-		if (likely(rseq_finish(&lock->c[cpu].v, 1, rseq_state)))
-			break;
-		/* Fallback on cpu_opv system call. */
 		cpu = rseq_current_cpu_raw();
-		ret = cpu_op_cmpstore(&lock->c[cpu].v, &expect, &n,
-			sizeof(intptr_t), cpu);
+		if (unlikely(cpu < 0))
+			goto slowpath;
+		ret = rseq_cmpeqv_storev(&lock->c[cpu].v,
+				0, 1, cpu);
+		if (likely(!ret))
+			break;
+		if (ret > 0)
+			continue;	/* Retry. */
+#endif
+	slowpath:
+		__attribute__((unused));
+		/* Fallback on cpu_opv system call. */
+		cpu = rseq_current_cpu();
+		ret = cpu_op_cmpeqv_storev(&lock->c[cpu].v, 0, 1, cpu);
 		if (likely(!ret))
 			break;
 		assert(ret >= 0 || errno == EAGAIN);
 	}
 	/*
 	 * Acquire semantic when taking lock after control dependency.
-	 * Matches smp_store_release().
+	 * Matches rseq_smp_store_release().
 	 */
-	smp_acquire__after_ctrl_dep();
+	rseq_smp_acquire__after_ctrl_dep();
 	return cpu;
 }
 
@@ -81,9 +86,9 @@ void rseq_percpu_unlock(struct percpu_lock *lock, int cpu)
 	assert(lock->c[cpu].v == 1);
 	/*
 	 * Release lock, with release semantic. Matches
-	 * smp_acquire__after_ctrl_dep().
+	 * rseq_smp_acquire__after_ctrl_dep().
 	 */
-	smp_store_release(&lock->c[cpu].v, 0);
+	rseq_smp_store_release(&lock->c[cpu].v, 0);
 }
 
 void *test_percpu_spinlock_thread(void *arg)
@@ -137,33 +142,37 @@ void test_percpu_spinlock(void)
 
 int percpu_list_push(struct percpu_list *list, struct percpu_list_node *node)
 {
-	struct rseq_state rseq_state;
 	intptr_t *targetptr, newval, expect;
-	int cpu;
+	int cpu, ret;
 
+#ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	rseq_state = rseq_start();
-	cpu = rseq_cpu_at_start(rseq_state);
+	cpu = rseq_current_cpu_raw();
+	if (unlikely(cpu < 0))
+		goto slowpath;
+	/* Load list->c[cpu].head with single-copy atomicity. */
+	expect = (intptr_t)READ_ONCE(list->c[cpu].head);
 	newval = (intptr_t)node;
 	targetptr = (intptr_t *)&list->c[cpu].head;
-	node->next = list->c[cpu].head;
-	if (unlikely(!rseq_finish(targetptr, newval, rseq_state))) {
-		/* Fallback on cpu_opv system call. */
-		for (;;) {
-			int ret;
-
-			cpu = rseq_current_cpu_raw();
-			/* Load list->c[cpu].head with single-copy atomicity. */
-			expect = (intptr_t)READ_ONCE(list->c[cpu].head);
-			newval = (intptr_t)node;
-			targetptr = (intptr_t *)&list->c[cpu].head;
-			node->next = (struct percpu_list_node *)expect;
-			ret = cpu_op_cmpstore(targetptr, &expect, &newval,
-				sizeof(intptr_t), cpu);
-			if (likely(!ret))
-				break;
-			assert(ret >= 0 || errno == EAGAIN);
-		}
+	node->next = (struct percpu_list_node *)expect;
+	ret = rseq_cmpeqv_storev(targetptr, expect, newval, cpu);
+	if (likely(!ret))
+		return cpu;
+#endif
+	/* Fallback on cpu_opv system call. */
+	slowpath:
+		__attribute__((unused));
+	for (;;) {
+		cpu = rseq_current_cpu();
+		/* Load list->c[cpu].head with single-copy atomicity. */
+		expect = (intptr_t)READ_ONCE(list->c[cpu].head);
+		newval = (intptr_t)node;
+		targetptr = (intptr_t *)&list->c[cpu].head;
+		node->next = (struct percpu_list_node *)expect;
+		ret = cpu_op_cmpeqv_storev(targetptr, expect, newval, cpu);
+		if (likely(!ret))
+			break;
+		assert(ret >= 0 || errno == EAGAIN);
 	}
 	return cpu;
 }
@@ -175,46 +184,39 @@ int percpu_list_push(struct percpu_list *list, struct percpu_list_node *node)
  */
 struct percpu_list_node *percpu_list_pop(struct percpu_list *list)
 {
-	struct percpu_list_node *head, *next;
-	struct rseq_state rseq_state;
-	intptr_t *targetptr, newval, expect;
-	int cpu;
+	struct percpu_list_node *head;
+	int cpu, ret;
 
+#ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	rseq_state = rseq_start();
-	cpu = rseq_cpu_at_start(rseq_state);
-	/* Load head with single-copy atomicity. */
-	head = READ_ONCE(list->c[cpu].head);
-	if (!head)
+	cpu = rseq_current_cpu_raw();
+	if (unlikely(cpu < 0))
+		goto slowpath;
+	ret = rseq_cmpnev_storeoffp_load((intptr_t *)&list->c[cpu].head,
+		(intptr_t)NULL,
+		offsetof(struct percpu_list_node, next),
+		(intptr_t *)&head, cpu);
+	if (likely(!ret))
+		return head;
+	if (ret > 0)
 		return NULL;
-	/* Load head->next with single-copy atomicity. */
-	next = READ_ONCE(head->next);
-	newval = (intptr_t)next;
-	targetptr = (intptr_t *)&list->c[cpu].head;
-	if (unlikely(!rseq_finish(targetptr, newval, rseq_state))) {
-		/* Fallback on cpu_opv system call. */
-		for (;;) {
-			int ret;
-
-			cpu = rseq_current_cpu_raw();
-			/* Load head with single-copy atomicity. */
-			head = READ_ONCE(list->c[cpu].head);
-			if (!head)
-				return NULL;
-			expect = (intptr_t)head;
-			/* Load head->next with single-copy atomicity. */
-			next = READ_ONCE(head->next);
-			newval = (intptr_t)next;
-			targetptr = (intptr_t *)&list->c[cpu].head;
-			ret = cpu_op_2cmp1store(targetptr, &expect, &newval,
-				&head->next, &next,
-				sizeof(intptr_t), cpu);
-			if (likely(!ret))
-				break;
-			assert(ret >= 0 || errno == EAGAIN);
-		}
+#endif
+	/* Fallback on cpu_opv system call. */
+	slowpath:
+		__attribute__((unused));
+	for (;;) {
+		cpu = rseq_current_cpu();
+		ret = cpu_op_cmpnev_storeoffp_load(
+			(intptr_t *)&list->c[cpu].head,
+			(intptr_t)NULL,
+			offsetof(struct percpu_list_node, next),
+			(intptr_t *)&head, cpu);
+		if (likely(!ret))
+			break;
+		if (ret > 0)
+			return NULL;
+		assert(ret >= 0 || errno == EAGAIN);
 	}
-
 	return head;
 }
 
