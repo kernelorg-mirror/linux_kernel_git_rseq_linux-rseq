@@ -86,22 +86,29 @@ struct cpu_op {
 		struct {
 			CPU_OP_FIELD_u32_u64(a);
 			CPU_OP_FIELD_u32_u64(b);
+			uint8_t expect_fault_a;
+			uint8_t expect_fault_b;
 		} compare_op;
 		struct {
 			CPU_OP_FIELD_u32_u64(dst);
 			CPU_OP_FIELD_u32_u64(src);
+			uint8_t expect_fault_dst;
+			uint8_t expect_fault_src;
 		} memcpy_op;
 		struct {
 			CPU_OP_FIELD_u32_u64(p);
 			int64_t count;
+			uint8_t expect_fault_p;
 		} arithmetic_op;
 		struct {
 			CPU_OP_FIELD_u32_u64(p);
 			uint64_t mask;
+			uint8_t expect_fault_p;
 		} bitwise_op;
 		struct {
 			CPU_OP_FIELD_u32_u64(p);
 			uint32_t bits;
+			uint8_t expect_fault_p;
 		} shift_op;
 		char __padding[CPU_OP_ARG_LEN_MAX];
 	} u;

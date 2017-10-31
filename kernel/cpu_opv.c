@@ -27,6 +27,7 @@
 #include <linux/cpu_opv.h>
 #include <linux/types.h>
 #include <linux/mutex.h>
+#include <linux/pagemap.h>
 #include <asm/ptrace.h>
 #include <asm/byteorder.h>
 
@@ -170,25 +171,57 @@ static unsigned long cpu_op_range_nr_pages(unsigned long addr,
 	return ((addr + len - 1) >> PAGE_SHIFT) - (addr >> PAGE_SHIFT) + 1;
 }
 
-/* Return true if those pages are ram, else false. */
-static bool cpu_op_check_zone_device_pages(struct page **pages,
+static int cpu_op_check_page(struct page *page)
+{
+	struct address_space *mapping;
+
+	if (is_zone_device_page(page))
+		return -EFAULT;
+	page = compound_head(page);
+	mapping = READ_ONCE(page->mapping);
+	if (!mapping) {
+		int shmem_swizzled;
+
+		/*
+		 * Check again with page lock held to guard against
+		 * memory pressure making shmem_writepage move the page
+		 * from filecache to swapcache.
+		 */
+		lock_page(page);
+		shmem_swizzled = PageSwapCache(page) || page->mapping;
+		unlock_page(page);
+		if (shmem_swizzled)
+			return -EAGAIN;
+		return -EFAULT;
+	}
+	return 0;
+}
+
+/*
+ * Refusing device pages, the zero page, pages in the gate area, and
+ * special mappings. Inspired from futex.c checks.
+ */
+static int cpu_op_check_pages(struct page **pages,
 		unsigned long nr_pages)
 {
 	unsigned long i;
 
 	for (i = 0; i < nr_pages; i++) {
-		if (is_zone_device_page(pages[i]))
-			return true;
+		int ret;
+
+		ret = cpu_op_check_page(pages[i]);
+		if (ret)
+			return ret;
 	}
-	return false;
+	return 0;
 }
 
 static int cpu_op_pin_pages(unsigned long addr, unsigned long len,
-		struct page ***pinned_pages_ptr, size_t *nr_pinned)
+		struct page ***pinned_pages_ptr, size_t *nr_pinned,
+		int write)
 {
-	unsigned long nr_pages;
 	struct page *pages[2];
-	int ret;
+	int ret, nr_pages;
 
 	if (!len)
 		return 0;
@@ -204,21 +237,32 @@ static int cpu_op_pin_pages(unsigned long addr, unsigned long len,
 			*nr_pinned * sizeof(struct page *));
 		*pinned_pages_ptr = pinned_pages;
 	}
-	ret = get_user_pages_fast(addr, nr_pages, 0, pages);
+again:
+	ret = get_user_pages_fast(addr, nr_pages, write, pages);
 	if (ret < nr_pages) {
 		if (ret > 0)
 			put_page(pages[0]);
 		return -EFAULT;
 	}
-	/* Refuse device pages. */
-	if (cpu_op_check_zone_device_pages(pages, nr_pages))
-		goto error_device;
+	/*
+	 * Refuse device pages, the zero page, pages in the gate area,
+	 * and special mappings.
+	 */
+	ret = cpu_op_check_pages(pages, nr_pages);
+	if (ret == -EAGAIN) {
+		put_page(pages[0]);
+		if (nr_pages > 1)
+			put_page(pages[1]);
+		goto again;
+	}
+	if (ret)
+		goto error;
 	(*pinned_pages_ptr)[(*nr_pinned)++] = pages[0];
 	if (nr_pages > 1)
 		(*pinned_pages_ptr)[(*nr_pinned)++] = pages[1];
 	return 0;
 
-error_device:
+error:
 	put_page(pages[0]);
 	if (nr_pages > 1)
 		put_page(pages[1]);
@@ -229,6 +273,7 @@ static int cpu_opv_pin_pages(struct cpu_op *cpuop, int cpuopcnt,
 		struct page ***pinned_pages_ptr, size_t *nr_pinned)
 {
 	int ret, i;
+	bool expect_fault = false;
 
 	/* Check access, pin pages. */
 	for (i = 0; i < cpuopcnt; i++) {
@@ -237,71 +282,85 @@ static int cpu_opv_pin_pages(struct cpu_op *cpuop, int cpuopcnt,
 		switch (op->op) {
 		case CPU_COMPARE_EQ_OP:
 		case CPU_COMPARE_NE_OP:
+			ret = -EFAULT;
+			expect_fault = op->u.compare_op.expect_fault_a;
 			if (!access_ok(VERIFY_READ, op->u.compare_op.a,
 					op->len))
 				goto error;
 			ret = cpu_op_pin_pages(
 					(unsigned long)op->u.compare_op.a,
-					op->len, pinned_pages_ptr, nr_pinned);
+					op->len, pinned_pages_ptr, nr_pinned, 0);
 			if (ret)
 				goto error;
+			ret = -EFAULT;
+			expect_fault = op->u.compare_op.expect_fault_b;
 			if (!access_ok(VERIFY_READ, op->u.compare_op.b,
 					op->len))
 				goto error;
 			ret = cpu_op_pin_pages(
 					(unsigned long)op->u.compare_op.b,
-					op->len, pinned_pages_ptr, nr_pinned);
+					op->len, pinned_pages_ptr, nr_pinned, 0);
 			if (ret)
 				goto error;
 			break;
 		case CPU_MEMCPY_OP:
+			ret = -EFAULT;
+			expect_fault = op->u.memcpy_op.expect_fault_dst;
 			if (!access_ok(VERIFY_WRITE, op->u.memcpy_op.dst,
 					op->len))
 				goto error;
 			ret = cpu_op_pin_pages(
 					(unsigned long)op->u.memcpy_op.dst,
-					op->len, pinned_pages_ptr, nr_pinned);
+					op->len, pinned_pages_ptr, nr_pinned, 1);
 			if (ret)
 				goto error;
+			ret = -EFAULT;
+			expect_fault = op->u.memcpy_op.expect_fault_src;
 			if (!access_ok(VERIFY_READ, op->u.memcpy_op.src,
 					op->len))
 				goto error;
 			ret = cpu_op_pin_pages(
 					(unsigned long)op->u.memcpy_op.src,
-					op->len, pinned_pages_ptr, nr_pinned);
+					op->len, pinned_pages_ptr, nr_pinned, 0);
 			if (ret)
 				goto error;
 			break;
 		case CPU_ADD_OP:
+			ret = -EFAULT;
+			expect_fault = op->u.arithmetic_op.expect_fault_p;
 			if (!access_ok(VERIFY_WRITE, op->u.arithmetic_op.p,
 					op->len))
 				goto error;
 			ret = cpu_op_pin_pages(
 					(unsigned long)op->u.arithmetic_op.p,
-					op->len, pinned_pages_ptr, nr_pinned);
+					op->len, pinned_pages_ptr, nr_pinned, 1);
 			if (ret)
 				goto error;
 			break;
 		case CPU_OR_OP:
 		case CPU_AND_OP:
 		case CPU_XOR_OP:
+			ret = -EFAULT;
+			expect_fault = op->u.bitwise_op.expect_fault_p;
 			if (!access_ok(VERIFY_WRITE, op->u.bitwise_op.p,
 					op->len))
 				goto error;
 			ret = cpu_op_pin_pages(
 					(unsigned long)op->u.bitwise_op.p,
-					op->len, pinned_pages_ptr, nr_pinned);
+					op->len, pinned_pages_ptr, nr_pinned, 1);
 			if (ret)
 				goto error;
 			break;
 		case CPU_LSHIFT_OP:
 		case CPU_RSHIFT_OP:
+			ret = -EFAULT;
+			expect_fault = op->u.shift_op.expect_fault_p;
 			if (!access_ok(VERIFY_WRITE, op->u.shift_op.p,
 					op->len))
 				goto error;
 			ret = cpu_op_pin_pages(
 					(unsigned long)op->u.shift_op.p,
-					op->len, pinned_pages_ptr, nr_pinned);
+					op->len, pinned_pages_ptr, nr_pinned, 1);
 			if (ret)
 				goto error;
 			break;
@@ -317,6 +376,15 @@ error:
 	for (i = 0; i < *nr_pinned; i++)
 		put_page((*pinned_pages_ptr)[i]);
 	*nr_pinned = 0;
+	/*
+	 * If faulting access is expected, return EAGAIN to user-space.
+	 * It allows user-space to distinguish between a fault caused by
+	 * an access which is expect to fault (e.g. due to concurrent
+	 * unmapping of underlying memory) from an unexpected fault from
+	 * which a retry would not recover.
+	 */
+	if (ret == -EFAULT && expect_fault)
+		return -EAGAIN;
 	return ret;
 }
 
