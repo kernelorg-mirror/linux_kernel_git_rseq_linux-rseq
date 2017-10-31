@@ -75,6 +75,7 @@ enum cpu_op_type {
 	CPU_XOR_OP,		/* bitwise */
 	CPU_LSHIFT_OP,		/* shift */
 	CPU_RSHIFT_OP,		/* shift */
+	CPU_MB_OP,		/* memory barrier */
 };
 
 /* Vector of operations to perform. Limited to 16. */

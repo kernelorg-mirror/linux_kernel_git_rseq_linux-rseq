@@ -103,7 +103,12 @@ static int cpu_opv_check(struct cpu_op *cpuop, int cpuopcnt)
 	for (i = 0; i < cpuopcnt; i++) {
 		struct cpu_op *op = &cpuop[i];
 
-		sum += op->len;
+		switch (op->op) {
+		case CPU_MB_OP:
+			break;
+		default:
+			sum += op->len;
+		}
 		switch (op->op) {
 		case CPU_COMPARE_EQ_OP:
 		case CPU_COMPARE_NE_OP:
@@ -147,6 +152,8 @@ static int cpu_opv_check(struct cpu_op *cpuop, int cpuopcnt)
 			default:
 				return -EINVAL;
 			}
+			break;
+		case CPU_MB_OP:
 			break;
 		default:
 			return -EINVAL;
@@ -297,6 +304,8 @@ static int cpu_opv_pin_pages(struct cpu_op *cpuop, int cpuopcnt,
 					op->len, pinned_pages_ptr, nr_pinned);
 			if (ret)
 				goto error;
+			break;
+		case CPU_MB_OP:
 			break;
 		default:
 			return -EINVAL;
@@ -780,6 +789,9 @@ static int __do_cpu_opv(struct cpu_op *cpuop, int cpuopcnt)
 			/* Stop execution on error. */
 			if (ret)
 				return ret;
+			break;
+		case CPU_MB_OP:
+			smp_mb();
 			break;
 		default:
 			return -EINVAL;
