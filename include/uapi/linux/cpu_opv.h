@@ -36,12 +36,17 @@
 #include <asm/byteorder.h>
 
 #ifdef __LP64__
-# define CPU_OP_FIELD_u32_u64(field)	uint64_t field
+# define CPU_OP_FIELD_u32_u64(field)			uint64_t field
+# define CPU_OP_FIELD_u32_u64_INIT_ONSTACK(field, v)	field = (intptr_t)v
 #elif defined(__BYTE_ORDER) ? \
 	__BYTE_ORDER == __BIG_ENDIAN : defined(__BIG_ENDIAN)
-# define CPU_OP_FIELD_u32_u64(field)	uint32_t _padding ## field, field
+# define CPU_OP_FIELD_u32_u64(field)	uint32_t field ## _padding, field
+# define CPU_OP_FIELD_u32_u64_INIT_ONSTACK(field, v)	\
+	field ## _padding = 0, field = (intptr_t)v
 #else
-# define CPU_OP_FIELD_u32_u64(field)	uint32_t field, _padding ## field
+# define CPU_OP_FIELD_u32_u64(field)	uint32_t field, field ## _padding
+# define CPU_OP_FIELD_u32_u64_INIT_ONSTACK(field, v)	\
+	field = (intptr_t)v, field ## _padding = 0
 #endif
 
 #define CPU_OP_VEC_LEN_MAX		16
