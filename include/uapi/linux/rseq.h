@@ -80,13 +80,21 @@ struct rseq_cs {
  */
 struct rseq {
 	/*
+	 * Restartable sequences cpu_id_start field. Updated by the kernel, and
+	 * read by user-space with single-copy atomicity semantics. Aligned on
+	 * 32-bit. Always contain a value in the range of possible CPUs, although
+	 * the value may not be the actual current CPU (e.g. if rseq is not
+	 * initialized). This CPU number value should always be confirmed against
+	 * the value of the cpu_id field.
+	 */
+	uint32_t cpu_id_start;
+	/*
 	 * Restartable sequences cpu_id field. Updated by the kernel, and
 	 * read by user-space with single-copy atomicity semantics. Aligned
-	 * on 32-bit. Negative values are reserved for user-space.
+	 * on 32-bit. Values -1U and -2U have a special semantic: -1U means
+	 * "rseq uninitialized", and -2U means "rseq initialization failed".
 	 */
-	int32_t cpu_id;
-	/* Reserved for future use. */
-	uint32_t reserved;
+	uint32_t cpu_id;
 	/*
 	 * Restartable sequences rseq_cs field.
 	 *

@@ -117,8 +117,10 @@
 
 static bool rseq_update_cpu_id(struct task_struct *t)
 {
-	int32_t cpu_id = raw_smp_processor_id();
+	uint32_t cpu_id = raw_smp_processor_id();
 
+	if (__put_user(cpu_id, &t->rseq->cpu_id_start))
+		return false;
 	if (__put_user(cpu_id, &t->rseq->cpu_id))
 		return false;
 	trace_rseq_update(t);
@@ -127,10 +129,15 @@ static bool rseq_update_cpu_id(struct task_struct *t)
 
 static bool rseq_reset_rseq_cpu_id(struct task_struct *t)
 {
-	int32_t cpu_id = -1;
+	uint32_t cpu_id_start = 0, cpu_id = -1U;
 
 	/*
-	 * Reset cpu_id to -1, so any user coming in after unregistration can
+	 * Reset cpu_id_start to its initial state (0).
+	 */
+	if (__put_user(cpu_id_start, &t->rseq->cpu_id_start))
+		return false;
+	/*
+	 * Reset cpu_id to -1U, so any user coming in after unregistration can
 	 * figure out that rseq needs to be registered again.
 	 */
 	if (__put_user(cpu_id, &t->rseq->cpu_id))
