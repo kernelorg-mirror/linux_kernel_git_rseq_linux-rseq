@@ -46,80 +46,6 @@ int cpu_op_get_current_cpu(void)
 	return cpu;
 }
 
-int cpu_op_cmpstore(void *v, void *expect, void *n, size_t len, int cpu)
-{
-	struct cpu_op opvec[] = {
-		[0] = {
-			.op = CPU_COMPARE_EQ_OP,
-			.len = len,
-			.u.compare_op.a = (unsigned long)v,
-			.u.compare_op.b = (unsigned long)expect,
-		},
-		[1] = {
-			.op = CPU_MEMCPY_OP,
-			.len = len,
-			.u.memcpy_op.dst = (unsigned long)v,
-			.u.memcpy_op.src = (unsigned long)n,
-		},
-	};
-
-	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
-}
-
-int cpu_op_2cmp1store(void *v, void *expect, void *n, void *check2,
-		void *expect2, size_t len, int cpu)
-{
-	struct cpu_op opvec[] = {
-		[0] = {
-			.op = CPU_COMPARE_EQ_OP,
-			.len = len,
-			.u.compare_op.a = (unsigned long)v,
-			.u.compare_op.b = (unsigned long)expect,
-		},
-		[1] = {
-			.op = CPU_COMPARE_EQ_OP,
-			.len = len,
-			.u.compare_op.a = (unsigned long)check2,
-			.u.compare_op.b = (unsigned long)expect2,
-		},
-		[2] = {
-			.op = CPU_MEMCPY_OP,
-			.len = len,
-			.u.memcpy_op.dst = (unsigned long)v,
-			.u.memcpy_op.src = (unsigned long)n,
-		},
-	};
-
-	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
-}
-
-int cpu_op_1cmp2store(void *v, void *expect, void *_new,
-		void *v2, void *_new2, size_t len, int cpu)
-{
-	struct cpu_op opvec[] = {
-		[0] = {
-			.op = CPU_COMPARE_EQ_OP,
-			.len = len,
-			.u.compare_op.a = (unsigned long)v,
-			.u.compare_op.b = (unsigned long)expect,
-		},
-		[1] = {
-			.op = CPU_MEMCPY_OP,
-			.len = len,
-			.u.memcpy_op.dst = (unsigned long)v,
-			.u.memcpy_op.src = (unsigned long)_new,
-		},
-		[2] = {
-			.op = CPU_MEMCPY_OP,
-			.len = len,
-			.u.memcpy_op.dst = (unsigned long)v2,
-			.u.memcpy_op.src = (unsigned long)_new2,
-		},
-	};
-
-	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
-}
-
 int cpu_op_cmpxchg(void *v, void *expect, void *old, void *n,
 		size_t len, int cpu)
 {
@@ -129,18 +55,24 @@ int cpu_op_cmpxchg(void *v, void *expect, void *old, void *n,
 			.len = len,
 			.u.memcpy_op.dst = (unsigned long)old,
 			.u.memcpy_op.src = (unsigned long)v,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
 		},
 		[1] = {
 			.op = CPU_COMPARE_EQ_OP,
 			.len = len,
 			.u.compare_op.a = (unsigned long)v,
 			.u.compare_op.b = (unsigned long)expect,
+			.u.compare_op.expect_fault_a = 0,
+			.u.compare_op.expect_fault_b = 0,
 		},
 		[2] = {
 			.op = CPU_MEMCPY_OP,
 			.len = len,
 			.u.memcpy_op.dst = (unsigned long)v,
 			.u.memcpy_op.src = (unsigned long)n,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
 		},
 	};
 
@@ -155,35 +87,262 @@ int cpu_op_add(void *v, int64_t count, size_t len, int cpu)
 			.len = len,
 			.u.arithmetic_op.p = (unsigned long)v,
 			.u.arithmetic_op.count = count,
+			.u.arithmetic_op.expect_fault_p = 0,
 		},
 	};
 
 	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
 }
 
-int cpu_op_cmpstorememcpy(void *v, void *expect, void *_new, size_t len,
-		void *dst, void *src, size_t copylen, int cpu)
+int cpu_op_cmpeqv_storev(intptr_t *v, intptr_t expect, intptr_t newv,
+		int cpu)
 {
 	struct cpu_op opvec[] = {
 		[0] = {
 			.op = CPU_COMPARE_EQ_OP,
-			.len = len,
+			.len = sizeof(intptr_t),
 			.u.compare_op.a = (unsigned long)v,
-			.u.compare_op.b = (unsigned long)expect,
+			.u.compare_op.b = (unsigned long)&expect,
+			.u.compare_op.expect_fault_a = 0,
+			.u.compare_op.expect_fault_b = 0,
 		},
 		[1] = {
 			.op = CPU_MEMCPY_OP,
-			.len = len,
+			.len = sizeof(intptr_t),
 			.u.memcpy_op.dst = (unsigned long)v,
-			.u.memcpy_op.src = (unsigned long)_new,
-		},
-		[2] = {
-			.op = CPU_MEMCPY_OP,
-			.len = copylen,
-			.u.memcpy_op.dst = (unsigned long)dst,
-			.u.memcpy_op.src = (unsigned long)src,
+			.u.memcpy_op.src = (unsigned long)&newv,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
 		},
 	};
 
 	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
+}
+
+static int cpu_op_cmpeqv_storep_expect_fault(intptr_t *v, intptr_t expect,
+		intptr_t *newp, int cpu)
+{
+	struct cpu_op opvec[] = {
+		[0] = {
+			.op = CPU_COMPARE_EQ_OP,
+			.len = sizeof(intptr_t),
+			.u.compare_op.a = (unsigned long)v,
+			.u.compare_op.b = (unsigned long)&expect,
+			.u.compare_op.expect_fault_a = 0,
+			.u.compare_op.expect_fault_b = 0,
+		},
+		[1] = {
+			.op = CPU_MEMCPY_OP,
+			.len = sizeof(intptr_t),
+			.u.memcpy_op.dst = (unsigned long)v,
+			.u.memcpy_op.src = (unsigned long)newp,
+			.u.memcpy_op.expect_fault_dst = 0,
+			/* Return EAGAIN on src fault. */
+			.u.memcpy_op.expect_fault_src = 1,
+		},
+	};
+
+	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
+}
+
+int cpu_op_cmpnev_storeoffp_load(intptr_t *v, intptr_t expectnot,
+		off_t voffp, intptr_t *load, int cpu)
+{
+	intptr_t oldv = READ_ONCE(*v);
+	intptr_t *newp = (intptr_t *)(oldv + voffp);
+	int ret;
+
+	if (oldv == expectnot)
+		return 1;
+	ret = cpu_op_cmpeqv_storep_expect_fault(v, oldv, newp, cpu);
+	if (!ret) {
+		*load = oldv;
+		return 0;
+	}
+	if (ret > 0) {
+		errno = EAGAIN;
+		return -1;
+	}
+	return -1;
+}
+
+int cpu_op_cmpeqv_storev_storev(intptr_t *v, intptr_t expect,
+		intptr_t *v2, intptr_t newv2, intptr_t newv,
+		int cpu)
+{
+	struct cpu_op opvec[] = {
+		[0] = {
+			.op = CPU_COMPARE_EQ_OP,
+			.len = sizeof(intptr_t),
+			.u.compare_op.a = (unsigned long)v,
+			.u.compare_op.b = (unsigned long)&expect,
+			.u.compare_op.expect_fault_a = 0,
+			.u.compare_op.expect_fault_b = 0,
+		},
+		[1] = {
+			.op = CPU_MEMCPY_OP,
+			.len = sizeof(intptr_t),
+			.u.memcpy_op.dst = (unsigned long)v2,
+			.u.memcpy_op.src = (unsigned long)&newv2,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
+		},
+		[2] = {
+			.op = CPU_MEMCPY_OP,
+			.len = sizeof(intptr_t),
+			.u.memcpy_op.dst = (unsigned long)v,
+			.u.memcpy_op.src = (unsigned long)&newv,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
+		},
+	};
+
+	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
+}
+
+int cpu_op_cmpeqv_storev_mb_storev(intptr_t *v, intptr_t expect,
+		intptr_t *v2, intptr_t newv2, intptr_t newv,
+		int cpu)
+{
+	struct cpu_op opvec[] = {
+		[0] = {
+			.op = CPU_COMPARE_EQ_OP,
+			.len = sizeof(intptr_t),
+			.u.compare_op.a = (unsigned long)v,
+			.u.compare_op.b = (unsigned long)&expect,
+			.u.compare_op.expect_fault_a = 0,
+			.u.compare_op.expect_fault_b = 0,
+		},
+		[1] = {
+			.op = CPU_MEMCPY_OP,
+			.len = sizeof(intptr_t),
+			.u.memcpy_op.dst = (unsigned long)v2,
+			.u.memcpy_op.src = (unsigned long)&newv2,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
+		},
+		[2] = {
+			.op = CPU_MB_OP,
+		},
+		[3] = {
+			.op = CPU_MEMCPY_OP,
+			.len = sizeof(intptr_t),
+			.u.memcpy_op.dst = (unsigned long)v,
+			.u.memcpy_op.src = (unsigned long)&newv,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
+		},
+	};
+
+	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
+}
+
+int cpu_op_cmpeqv_cmpeqv_storev(intptr_t *v, intptr_t expect,
+		intptr_t *v2, intptr_t expect2, intptr_t newv,
+		int cpu)
+{
+	struct cpu_op opvec[] = {
+		[0] = {
+			.op = CPU_COMPARE_EQ_OP,
+			.len = sizeof(intptr_t),
+			.u.compare_op.a = (unsigned long)v,
+			.u.compare_op.b = (unsigned long)&expect,
+			.u.compare_op.expect_fault_a = 0,
+			.u.compare_op.expect_fault_b = 0,
+		},
+		[1] = {
+			.op = CPU_COMPARE_EQ_OP,
+			.len = sizeof(intptr_t),
+			.u.compare_op.a = (unsigned long)v2,
+			.u.compare_op.b = (unsigned long)&expect2,
+			.u.compare_op.expect_fault_a = 0,
+			.u.compare_op.expect_fault_b = 0,
+		},
+		[2] = {
+			.op = CPU_MEMCPY_OP,
+			.len = sizeof(intptr_t),
+			.u.memcpy_op.dst = (unsigned long)v,
+			.u.memcpy_op.src = (unsigned long)&newv,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
+		},
+	};
+
+	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
+}
+
+int cpu_op_cmpeqv_memcpy_storev(intptr_t *v, intptr_t expect,
+		void *dst, void *src, size_t len, intptr_t newv,
+		int cpu)
+{
+	struct cpu_op opvec[] = {
+		[0] = {
+			.op = CPU_COMPARE_EQ_OP,
+			.len = sizeof(intptr_t),
+			.u.compare_op.a = (unsigned long)v,
+			.u.compare_op.b = (unsigned long)&expect,
+			.u.compare_op.expect_fault_a = 0,
+			.u.compare_op.expect_fault_b = 0,
+		},
+		[1] = {
+			.op = CPU_MEMCPY_OP,
+			.len = len,
+			.u.memcpy_op.dst = (unsigned long)dst,
+			.u.memcpy_op.src = (unsigned long)src,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
+		},
+		[2] = {
+			.op = CPU_MEMCPY_OP,
+			.len = sizeof(intptr_t),
+			.u.memcpy_op.dst = (unsigned long)v,
+			.u.memcpy_op.src = (unsigned long)&newv,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
+		},
+	};
+
+	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
+}
+
+int cpu_op_cmpeqv_memcpy_mb_storev(intptr_t *v, intptr_t expect,
+		void *dst, void *src, size_t len, intptr_t newv,
+		int cpu)
+{
+	struct cpu_op opvec[] = {
+		[0] = {
+			.op = CPU_COMPARE_EQ_OP,
+			.len = sizeof(intptr_t),
+			.u.compare_op.a = (unsigned long)v,
+			.u.compare_op.b = (unsigned long)&expect,
+			.u.compare_op.expect_fault_a = 0,
+			.u.compare_op.expect_fault_b = 0,
+		},
+		[1] = {
+			.op = CPU_MEMCPY_OP,
+			.len = len,
+			.u.memcpy_op.dst = (unsigned long)dst,
+			.u.memcpy_op.src = (unsigned long)src,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
+		},
+		[2] = {
+			.op = CPU_MB_OP,
+		},
+		[3] = {
+			.op = CPU_MEMCPY_OP,
+			.len = sizeof(intptr_t),
+			.u.memcpy_op.dst = (unsigned long)v,
+			.u.memcpy_op.src = (unsigned long)&newv,
+			.u.memcpy_op.expect_fault_dst = 0,
+			.u.memcpy_op.expect_fault_src = 0,
+		},
+	};
+
+	return cpu_opv(opvec, ARRAY_SIZE(opvec), cpu, 0);
+}
+
+int cpu_op_addv(intptr_t *v, int64_t count, int cpu)
+{
+	return cpu_op_add(v, count, sizeof(intptr_t), cpu);
 }
