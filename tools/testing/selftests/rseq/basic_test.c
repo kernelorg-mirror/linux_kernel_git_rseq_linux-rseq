@@ -24,8 +24,10 @@ void test_cpu_pointer(void)
 			CPU_SET(i, &test_affinity);
 			sched_setaffinity(0, sizeof(test_affinity),
 					&test_affinity);
-			assert(rseq_current_cpu() == sched_getcpu());
+			assert(sched_getcpu() == i);
 			assert(rseq_current_cpu() == i);
+			assert(rseq_current_cpu_raw() == i);
+			assert(rseq_cpu_start() == i);
 			CPU_CLR(i, &test_affinity);
 		}
 	}

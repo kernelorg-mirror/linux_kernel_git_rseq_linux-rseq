@@ -224,9 +224,7 @@ static int rseq_percpu_lock(struct percpu_lock *lock)
 
 #ifndef SKIP_FASTPATH
 		/* Try fast path. */
-		cpu = rseq_current_cpu_raw();
-		if (unlikely(cpu < 0))
-			goto slowpath;
+		cpu = rseq_cpu_start();
 		ret = rseq_cmpeqv_storev(&lock->c[cpu].v,
 				0, 1, cpu);
 		if (likely(!ret))
@@ -352,9 +350,7 @@ void *test_percpu_inc_thread(void *arg)
 
 #ifndef SKIP_FASTPATH
 		/* Try fast path. */
-		cpu = rseq_current_cpu_raw();
-		if (unlikely(cpu < 0))
-			goto slowpath;
+		cpu = rseq_cpu_start();
 		ret = rseq_addv(&data->c[cpu].count, 1, cpu);
 		if (likely(!ret))
 			goto next;
@@ -433,9 +429,7 @@ int percpu_list_push(struct percpu_list *list, struct percpu_list_node *node)
 
 #ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	cpu = rseq_current_cpu_raw();
-	if (unlikely(cpu < 0))
-		goto slowpath;
+	cpu = rseq_cpu_start();
 	/* Load list->c[cpu].head with single-copy atomicity. */
 	expect = (intptr_t)READ_ONCE(list->c[cpu].head);
 	newval = (intptr_t)node;
@@ -475,9 +469,7 @@ struct percpu_list_node *percpu_list_pop(struct percpu_list *list)
 
 #ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	cpu = rseq_current_cpu_raw();
-	if (unlikely(cpu < 0))
-		goto slowpath;
+	cpu = rseq_cpu_start();
 	ret = rseq_cmpnev_storeoffp_load((intptr_t *)&list->c[cpu].head,
 		(intptr_t)NULL,
 		offsetof(struct percpu_list_node, next),
@@ -616,13 +608,14 @@ bool percpu_buffer_push(struct percpu_buffer *buffer,
 
 #ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	cpu = rseq_current_cpu_raw();
-	if (unlikely(cpu < 0))
-		goto slowpath;
+	cpu = rseq_cpu_start();
 	/* Load offset with single-copy atomicity. */
 	offset = READ_ONCE(buffer->c[cpu].offset);
-	if (offset == buffer->c[cpu].buflen)
+	if (offset == buffer->c[cpu].buflen) {
+		if (unlikely(cpu != rseq_current_cpu_raw()))
+			goto slowpath;
 		return false;
+	}
 	newval_spec = (intptr_t)node;
 	targetptr_spec = (intptr_t *)&buffer->c[cpu].array[offset];
 	newval_final = offset + 1;
@@ -675,13 +668,14 @@ struct percpu_buffer_node *percpu_buffer_pop(struct percpu_buffer *buffer)
 
 #ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	cpu = rseq_current_cpu_raw();
-	if (unlikely(cpu < 0))
-		goto slowpath;
+	cpu = rseq_cpu_start();
 	/* Load offset with single-copy atomicity. */
 	offset = READ_ONCE(buffer->c[cpu].offset);
-	if (offset == 0)
+	if (offset == 0) {
+		if (unlikely(cpu != rseq_current_cpu_raw()))
+			goto slowpath;
 		return NULL;
+	}
 	head = buffer->c[cpu].array[offset - 1];
 	newval = offset - 1;
 	targetptr = (intptr_t *)&buffer->c[cpu].offset;
@@ -842,13 +836,14 @@ bool percpu_memcpy_buffer_push(struct percpu_memcpy_buffer *buffer,
 
 #ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	cpu = rseq_current_cpu_raw();
-	if (unlikely(cpu < 0))
-		goto slowpath;
+	cpu = rseq_cpu_start();
 	/* Load offset with single-copy atomicity. */
 	offset = READ_ONCE(buffer->c[cpu].offset);
-	if (offset == buffer->c[cpu].buflen)
+	if (offset == buffer->c[cpu].buflen) {
+		if (unlikely(cpu != rseq_current_cpu_raw()))
+			goto slowpath;
 		return false;
+	}
 	destptr = (char *)&buffer->c[cpu].array[offset];
 	srcptr = (char *)&item;
 	copylen = sizeof(item);
@@ -906,13 +901,14 @@ bool percpu_memcpy_buffer_pop(struct percpu_memcpy_buffer *buffer,
 
 #ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	cpu = rseq_current_cpu_raw();
-	if (unlikely(cpu < 0))
-		goto slowpath;
+	cpu = rseq_cpu_start();
 	/* Load offset with single-copy atomicity. */
 	offset = READ_ONCE(buffer->c[cpu].offset);
-	if (offset == 0)
+	if (offset == 0) {
+		if (unlikely(cpu != rseq_current_cpu_raw()))
+			goto slowpath;
 		return false;
+	}
 	destptr = (char *)item;
 	srcptr = (char *)&buffer->c[cpu].array[offset - 1];
 	copylen = sizeof(*item);

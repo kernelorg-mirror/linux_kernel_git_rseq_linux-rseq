@@ -87,9 +87,9 @@ extern __thread volatile struct rseq __rseq_abi;
 /*
  * Register rseq for the current thread. This needs to be called once
  * by any thread which uses restartable sequences, before they start
- * using restartable sequences. If initialization is not invoked, or if
- * it fails, the restartable critical sections will fall-back on locking
- * (rseq_lock).
+ * using restartable sequences, to ensure restartable sequences
+ * succeed. A restartable sequence executed from a non-registered
+ * thread will always fail.
  */
 int rseq_register_current_thread(void);
 
@@ -101,14 +101,34 @@ int rseq_unregister_current_thread(void);
 /*
  * Restartable sequence fallback for reading the current CPU number.
  */
-int rseq_fallback_current_cpu(void);
+int32_t rseq_fallback_current_cpu(void);
 
+/*
+ * Values returned can be either the current CPU number, -1 (rseq is
+ * uninitialized), or -2 (rseq initialization has failed).
+ */
 static inline int32_t rseq_current_cpu_raw(void)
 {
 	return RSEQ_ACCESS_ONCE(__rseq_abi.cpu_id);
 }
 
-static inline int32_t rseq_current_cpu(void)
+/*
+ * Returns a possible CPU number, which is typically the current CPU.
+ * The returned CPU number can be used to prepare for an rseq critical
+ * section, which will confirm whether the cpu number is indeed the
+ * current one, and whether rseq is initialized.
+ *
+ * The CPU number returned by rseq_cpu_start should always be validated
+ * by passing it to a rseq asm sequence, or by comparing it to the
+ * return value of rseq_current_cpu_raw() if the rseq asm sequence
+ * does not need to be invoked.
+ */
+static inline uint32_t rseq_cpu_start(void)
+{
+	return RSEQ_ACCESS_ONCE(__rseq_abi.cpu_id_start);
+}
+
+static inline uint32_t rseq_current_cpu(void)
 {
 	int32_t cpu;
 

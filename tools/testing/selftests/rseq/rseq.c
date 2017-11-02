@@ -71,9 +71,9 @@ int rseq_unregister_current_thread(void)
 	return 0;
 }
 
-int rseq_fallback_current_cpu(void)
+int32_t rseq_fallback_current_cpu(void)
 {
-	int cpu;
+	int32_t cpu;
 
 	cpu = sched_getcpu();
 	if (cpu < 0) {

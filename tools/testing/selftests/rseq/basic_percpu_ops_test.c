@@ -54,9 +54,7 @@ int rseq_percpu_lock(struct percpu_lock *lock)
 
 #ifndef SKIP_FASTPATH
 		/* Try fast path. */
-		cpu = rseq_current_cpu_raw();
-		if (unlikely(cpu < 0))
-			goto slowpath;
+		cpu = rseq_cpu_start();
 		ret = rseq_cmpeqv_storev(&lock->c[cpu].v,
 				0, 1, cpu);
 		if (likely(!ret))
@@ -147,9 +145,7 @@ int percpu_list_push(struct percpu_list *list, struct percpu_list_node *node)
 
 #ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	cpu = rseq_current_cpu_raw();
-	if (unlikely(cpu < 0))
-		goto slowpath;
+	cpu = rseq_cpu_start();
 	/* Load list->c[cpu].head with single-copy atomicity. */
 	expect = (intptr_t)READ_ONCE(list->c[cpu].head);
 	newval = (intptr_t)node;
@@ -189,9 +185,7 @@ struct percpu_list_node *percpu_list_pop(struct percpu_list *list)
 
 #ifndef SKIP_FASTPATH
 	/* Try fast path. */
-	cpu = rseq_current_cpu_raw();
-	if (unlikely(cpu < 0))
-		goto slowpath;
+	cpu = rseq_cpu_start();
 	ret = rseq_cmpnev_storeoffp_load((intptr_t *)&list->c[cpu].head,
 		(intptr_t)NULL,
 		offsetof(struct percpu_list_node, next),
