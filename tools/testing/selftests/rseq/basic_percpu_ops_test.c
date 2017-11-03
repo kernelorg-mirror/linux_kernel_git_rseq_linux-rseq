@@ -94,15 +94,21 @@ void *test_percpu_spinlock_thread(void *arg)
 	struct spinlock_test_data *data = arg;
 	int i, cpu;
 
-	if (rseq_register_current_thread())
+	if (rseq_register_current_thread()) {
+		fprintf(stderr, "Error: rseq_register_current_thread(...) failed(%d): %s\n",
+			errno, strerror(errno));
 		abort();
+	}
 	for (i = 0; i < data->reps; i++) {
 		cpu = rseq_percpu_lock(&data->lock);
 		data->c[cpu].count++;
 		rseq_percpu_unlock(&data->lock, cpu);
 	}
-	if (rseq_unregister_current_thread())
+	if (rseq_unregister_current_thread()) {
+		fprintf(stderr, "Error: rseq_unregister_current_thread(...) failed(%d): %s\n",
+			errno, strerror(errno));
 		abort();
+	}
 
 	return NULL;
 }
@@ -219,8 +225,11 @@ void *test_percpu_list_thread(void *arg)
 	int i;
 	struct percpu_list *list = (struct percpu_list *)arg;
 
-	if (rseq_register_current_thread())
+	if (rseq_register_current_thread()) {
+		fprintf(stderr, "Error: rseq_register_current_thread(...) failed(%d): %s\n",
+			errno, strerror(errno));
 		abort();
+	}
 
 	for (i = 0; i < 100000; i++) {
 		struct percpu_list_node *node = percpu_list_pop(list);
@@ -230,8 +239,11 @@ void *test_percpu_list_thread(void *arg)
 			percpu_list_push(list, node);
 	}
 
-	if (rseq_unregister_current_thread())
+	if (rseq_unregister_current_thread()) {
+		fprintf(stderr, "Error: rseq_unregister_current_thread(...) failed(%d): %s\n",
+			errno, strerror(errno));
 		abort();
+	}
 
 	return NULL;
 }
@@ -299,14 +311,20 @@ void test_percpu_list(void)
 
 int main(int argc, char **argv)
 {
-	if (rseq_register_current_thread())
+	if (rseq_register_current_thread()) {
+		fprintf(stderr, "Error: rseq_register_current_thread(...) failed(%d): %s\n",
+			errno, strerror(errno));
 		goto error;
+	}
 	printf("spinlock\n");
 	test_percpu_spinlock();
 	printf("percpu_list\n");
 	test_percpu_list();
-	if (rseq_unregister_current_thread())
+	if (rseq_unregister_current_thread()) {
+		fprintf(stderr, "Error: rseq_unregister_current_thread(...) failed(%d): %s\n",
+			errno, strerror(errno));
 		goto error;
+	}
 	return 0;
 
 error:

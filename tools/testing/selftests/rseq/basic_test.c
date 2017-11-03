@@ -36,12 +36,18 @@ void test_cpu_pointer(void)
 
 int main(int argc, char **argv)
 {
-	if (rseq_register_current_thread())
+	if (rseq_register_current_thread()) {
+		fprintf(stderr, "Error: rseq_register_current_thread(...) failed(%d): %s\n",
+			errno, strerror(errno));
 		goto init_thread_error;
+	}
 	printf("testing current cpu\n");
 	test_cpu_pointer();
-	if (rseq_unregister_current_thread())
+	if (rseq_unregister_current_thread()) {
+		fprintf(stderr, "Error: rseq_unregister_current_thread(...) failed(%d): %s\n",
+			errno, strerror(errno));
 		goto init_thread_error;
+	}
 	return 0;
 
 init_thread_error:

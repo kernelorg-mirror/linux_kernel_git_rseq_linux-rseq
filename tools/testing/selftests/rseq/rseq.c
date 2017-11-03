@@ -34,6 +34,29 @@ volatile struct rseq __rseq_abi = {
 	.cpu_id = -1,
 };
 
+static __attribute__((tls_model("initial-exec"))) __thread
+volatile int refcount;
+
+static void signal_off_save(sigset_t *oldset)
+{
+	sigset_t set;
+	int ret;
+
+	sigfillset(&set);
+	ret = pthread_sigmask(SIG_BLOCK, &set, oldset);
+	if (ret)
+		abort();
+}
+
+static void signal_restore(sigset_t oldset)
+{
+	int ret;
+
+	ret = pthread_sigmask(SIG_SETMASK, &oldset, NULL);
+	if (ret)
+		abort();
+}
+
 static int sys_rseq(volatile struct rseq *rseq_abi, uint32_t rseq_len,
 		int flags, uint32_t sig)
 {
@@ -42,33 +65,42 @@ static int sys_rseq(volatile struct rseq *rseq_abi, uint32_t rseq_len,
 
 int rseq_register_current_thread(void)
 {
-	int rc;
+	int rc, ret = 0;
+	sigset_t oldset;
 
+	signal_off_save(&oldset);
+	if (refcount++)
+		goto end;
 	rc = sys_rseq(&__rseq_abi, sizeof(struct rseq), 0, RSEQ_SIG);
-	if (rc) {
-		if (errno != EBUSY) {
-			fprintf(stderr, "Error: sys_rseq(...) failed(%d): %s\n",
-				errno, strerror(errno));
-			__rseq_abi.cpu_id = -2;
-		}
-		return -1;
+	if (!rc) {
+		assert(rseq_current_cpu_raw() >= 0);
+		goto end;
 	}
-	assert(rseq_current_cpu() >= 0);
-	return 0;
+	if (errno != EBUSY)
+		__rseq_abi.cpu_id = -2;
+	ret = -1;
+	refcount--;
+end:
+	signal_restore(oldset);
+	return ret;
 }
 
 int rseq_unregister_current_thread(void)
 {
-	int rc;
+	int rc, ret = 0;
+	sigset_t oldset;
 
+	signal_off_save(&oldset);
+	if (--refcount)
+		goto end;
 	rc = sys_rseq(&__rseq_abi, sizeof(struct rseq),
 			RSEQ_FLAG_UNREGISTER, RSEQ_SIG);
-	if (rc) {
-		fprintf(stderr, "Error: sys_rseq(...) failed(%d): %s\n",
-			errno, strerror(errno));
-		return -1;
-	}
-	return 0;
+	if (!rc)
+		goto end;
+	ret = -1;
+end:
+	signal_restore(oldset);
+	return ret;
 }
 
 int32_t rseq_fallback_current_cpu(void)
