@@ -1405,6 +1405,7 @@ config RSEQ
 	default y
 	depends on HAVE_RSEQ
 	select CPU_OPV
+	select MEMBARRIER
 	help
 	  Enable the restartable sequences system call. It provides a
 	  user-space cache for the current CPU number value, which
