@@ -770,6 +770,9 @@ static int __do_cpu_opv(struct cpu_op *cpuop, int cpuopcnt)
 	for (i = 0; i < cpuopcnt; i++) {
 		struct cpu_op *op = &cpuop[i];
 
+		/* Guarantee a compiler barrier between each operation. */
+		barrier();
+
 		switch (op->op) {
 		case CPU_COMPARE_EQ_OP:
 			ret = do_cpu_op_compare(
