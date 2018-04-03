@@ -2425,6 +2425,18 @@ static inline struct page *follow_page(struct vm_area_struct *vma,
 	return follow_page_mask(vma, address, foll_flags, &unused_page_mask);
 }
 
+static inline bool is_vma_noncached(struct vm_area_struct *vma)
+{
+	pgprot_t pgprot = vma->vm_page_prot;
+
+	/* Check whether architecture implements noncached pages. */
+	if (pgprot_val(pgprot_noncached(PAGE_KERNEL)) == pgprot_val(PAGE_KERNEL))
+		return false;
+	if (pgprot_val(pgprot) != pgprot_val(pgprot_noncached(pgprot)))
+		return false;
+	return true;
+}
+
 #define FOLL_WRITE	0x01	/* check pte is writable */
 #define FOLL_TOUCH	0x02	/* mark page accessed */
 #define FOLL_GET	0x04	/* do get_page on page */
