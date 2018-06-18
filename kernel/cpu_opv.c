@@ -59,6 +59,16 @@
 /* Maximum number of virtual addresses per op. */
 #define CPU_OP_VEC_MAX_ADDR		(2 * CPU_OP_VEC_LEN_MAX)
 
+/* Maximum address range size (aligned on SHMLBA) per virtual address. */
+#define CPU_OP_RANGE_PER_ADDR_MAX	(2 * SHMLBA)
+
+/*
+ * Minimum value for sysctl_cpu_opv_va_max_bytes is the maximum virtual memory
+ * space needed by one cpu_opv system call.
+ */
+#define CPU_OPV_VA_MAX_BYTES_MIN	\
+		(CPU_OP_VEC_MAX_ADDR * CPU_OP_RANGE_PER_ADDR_MAX)
+
 union op_fn_data {
 	uint8_t _u8;
 	uint16_t _u16;
@@ -95,6 +105,15 @@ struct opv_ipi_args {
  * offline CPU.
  */
 static DEFINE_MUTEX(cpu_opv_offline_lock);
+
+/* Maximum virtual address space which can be used by cpu_opv. */
+int sysctl_cpu_opv_va_max_bytes __read_mostly;
+int sysctl_cpu_opv_va_max_bytes_min;
+
+static atomic_t cpu_opv_va_allocated_bytes;
+
+/* Waitqueue for cpu_opv blocked on virtual address space reservation. */
+static DECLARE_WAIT_QUEUE_HEAD(cpu_opv_va_wait);
 
 /*
  * The cpu_opv system call executes a vector of operations on behalf of
@@ -482,6 +501,43 @@ static int cpu_opv_pin_pages_op(struct cpu_op *op,
 		return -EINVAL;
 	}
 	return 0;
+}
+
+/*
+ * Approximate the amount of virtual address space required per
+ * vaddr to a worse-case of CPU_OP_RANGE_PER_ADDR_MAX.
+ */
+static int cpu_opv_reserve_va(int nr_vaddr, int *reserved_va)
+{
+	int nr_bytes = nr_vaddr * CPU_OP_RANGE_PER_ADDR_MAX;
+	int old_bytes, new_bytes;
+
+	WARN_ON_ONCE(*reserved_va != 0);
+	if (nr_bytes > sysctl_cpu_opv_va_max_bytes) {
+		WARN_ON_ONCE(1);
+		return -EINVAL;
+	}
+	do {
+		wait_event(cpu_opv_va_wait,
+			(old_bytes = atomic_read(&cpu_opv_va_allocated_bytes)) +
+			nr_bytes <= sysctl_cpu_opv_va_max_bytes);
+		new_bytes = old_bytes + nr_bytes;
+	} while (atomic_cmpxchg(&cpu_opv_va_allocated_bytes,
+		 old_bytes, new_bytes) != old_bytes);
+
+	*reserved_va = nr_bytes;
+	return 0;
+}
+
+static void cpu_opv_unreserve_va(int *reserved_va)
+{
+	int nr_bytes = *reserved_va;
+
+	if (!nr_bytes)
+		return;
+	atomic_sub(nr_bytes, &cpu_opv_va_allocated_bytes);
+	wake_up(&cpu_opv_va_wait);
+	*reserved_va = 0;
 }
 
 static int cpu_opv_pin_pages(struct cpu_op *cpuop, int cpuopcnt,
@@ -893,7 +949,7 @@ SYSCALL_DEFINE4(cpu_opv, struct cpu_op __user *, ucpuopv, int, cpuopcnt,
 	struct cpu_opv_vaddr vaddr_ptrs = {
 		.nr_vaddr = 0,
 	};
-	int ret, i, nr_vaddr = 0;
+	int ret, i, nr_vaddr = 0, reserved_va = 0;
 	bool retry = false;
 
 	if (unlikely(flags & ~(CPU_OP_NR_FLAG | CPU_OP_VEC_LEN_MAX_FLAG)))
@@ -917,6 +973,9 @@ SYSCALL_DEFINE4(cpu_opv, struct cpu_op __user *, ucpuopv, int, cpuopcnt,
 	if (nr_vaddr > NR_VADDR)
 		return -EINVAL;
 again:
+	ret = cpu_opv_reserve_va(nr_vaddr, &reserved_va);
+	if (ret)
+		goto end;
 	ret = cpu_opv_pin_pages(cpuopv, cpuopcnt, &vaddr_ptrs);
 	if (ret)
 		goto end;
@@ -941,6 +1000,7 @@ end:
 	 */
 	if (vaddr_ptrs.nr_vaddr)
 		vm_unmap_aliases();
+	cpu_opv_unreserve_va(&reserved_va);
 	if (retry) {
 		retry = false;
 		vaddr_ptrs.nr_vaddr = 0;
@@ -948,3 +1008,15 @@ end:
 	}
 	return ret;
 }
+
+/*
+ * Dynamic initialization is required on sparc because SHMLBA is not a
+ * constant.
+ */
+static int __init cpu_opv_init(void)
+{
+	sysctl_cpu_opv_va_max_bytes = CPU_OPV_VA_MAX_BYTES_MIN;
+	sysctl_cpu_opv_va_max_bytes_min = CPU_OPV_VA_MAX_BYTES_MIN;
+	return 0;
+}
+core_initcall(cpu_opv_init);
