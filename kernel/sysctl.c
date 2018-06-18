@@ -176,6 +176,11 @@ extern int unaligned_dump_stack;
 extern int no_unaligned_warning;
 #endif
 
+#ifdef CONFIG_CPU_OPV
+extern int sysctl_cpu_opv_va_max_bytes;
+extern int sysctl_cpu_opv_va_max_bytes_min;
+#endif
+
 #ifdef CONFIG_PROC_SYSCTL
 
 /**
@@ -1250,6 +1255,16 @@ static struct ctl_table kern_table[] = {
 		.proc_handler	= stack_erasing_sysctl,
 		.extra1		= &zero,
 		.extra2		= &one,
+	},
+#endif
+#ifdef CONFIG_CPU_OPV
+	{
+		.procname	= "cpu_opv_va_max_bytes",
+		.data		= &sysctl_cpu_opv_va_max_bytes,
+		.maxlen		= sizeof(sysctl_cpu_opv_va_max_bytes),
+		.mode		= 0644,
+		.proc_handler	= proc_dointvec_minmax,
+		.extra1		= &sysctl_cpu_opv_va_max_bytes_min,
 	},
 #endif
 	{ }
