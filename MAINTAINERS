@@ -4136,6 +4136,7 @@ L:	linux-kernel@vger.kernel.org
 S:	Supported
 F:	kernel/do_on_cpu/
 F:	include/uapi/linux/do_on_cpu.h
+F:	tools/testing/selftests/do-on-cpu/
 
 CRAMFS FILESYSTEM
 M:	Nicolas Pitre <nico@fluxnic.net>
