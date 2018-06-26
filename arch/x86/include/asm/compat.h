@@ -8,6 +8,7 @@
 #include <linux/types.h>
 #include <linux/sched.h>
 #include <linux/sched/task_stack.h>
+#include <linux/signal.h>
 #include <asm/processor.h>
 #include <asm/user32.h>
 #include <asm/unistd.h>
@@ -241,5 +242,28 @@ static inline bool in_compat_syscall(void)
 struct compat_siginfo;
 int __copy_siginfo_to_user32(struct compat_siginfo __user *to,
 		const siginfo_t *from, bool x32_ABI);
+
+static inline int is_ia32_compat_frame(struct ksignal *ksig)
+{
+	return IS_ENABLED(CONFIG_IA32_EMULATION) &&
+		ksig->ka.sa.sa_flags & SA_IA32_ABI;
+}
+
+static inline int is_ia32_frame(struct ksignal *ksig)
+{
+	return IS_ENABLED(CONFIG_X86_32) || is_ia32_compat_frame(ksig);
+}
+
+static inline int is_x32_frame(struct ksignal *ksig)
+{
+	return IS_ENABLED(CONFIG_X86_X32_ABI) &&
+		ksig->ka.sa.sa_flags & SA_X32_ABI;
+}
+
+static inline bool is_compat_frame(struct ksignal *ksig)
+{
+	return is_ia32_frame(ksig) || is_x32_frame(ksig);
+}
+#define is_compat_frame	is_compat_frame		/* override the generic impl */
 
 #endif /* _ASM_X86_COMPAT_H */
