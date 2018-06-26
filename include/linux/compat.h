@@ -1022,11 +1022,28 @@ static inline struct compat_timeval ns_to_compat_timeval(s64 nsec)
 	return ctv;
 }
 
+/*
+ * For most but not all architectures, "is this a compat sigframe?" and
+ * "am I a compat task?" are the same question.  For architectures on which
+ * they aren't the same question, arch code can override is_compat_frame.
+ */
+
+#ifndef is_compat_frame
+static inline bool is_compat_frame(struct ksignal *ksig)
+{
+	return is_compat_task();
+}
+#endif
+
 #else /* !CONFIG_COMPAT */
 
 #define is_compat_task() (0)
 #ifndef in_compat_syscall
 static inline bool in_compat_syscall(void) { return false; }
+#endif
+
+#ifndef is_compat_frame
+static inline bool is_compat_frame(struct ksignal *ksig) { return false; }
 #endif
 
 #endif /* CONFIG_COMPAT */
