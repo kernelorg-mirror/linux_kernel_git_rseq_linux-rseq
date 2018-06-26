@@ -13,6 +13,7 @@
 #include <linux/syscalls.h>
 #include <linux/rseq.h>
 #include <linux/types.h>
+#include <linux/compat.h>
 #include <asm/ptrace.h>
 
 #define CREATE_TRACE_POINTS
@@ -112,7 +113,23 @@ static int rseq_reset_rseq_cpu_id(struct task_struct *t)
 	return 0;
 }
 
-static int rseq_get_rseq_cs(struct task_struct *t, struct rseq_cs *rseq_cs)
+#ifdef CONFIG_COMPAT
+static void rseq_cs_compat(struct ksignal *ksig, struct rseq_cs *rseq_cs)
+{
+	if (!(ksig ? is_compat_frame(ksig) : in_compat_syscall()))
+		return;
+
+	rseq_cs->abort_ip = (compat_uptr_t) rseq_cs->abort_ip;
+	rseq_cs->start_ip = (compat_uptr_t) rseq_cs->start_ip;
+	rseq_cs->post_commit_offset =
+		(compat_uptr_t) rseq_cs->post_commit_offset;
+}
+#else
+static void rseq_cs_compat(struct ksignal *ksig, struct rseq_cs *rseq_cs) { }
+#endif
+
+static int rseq_get_rseq_cs(struct ksignal *ksig, struct task_struct *t,
+			    struct rseq_cs *rseq_cs)
 {
 	struct rseq_cs __user *urseq_cs;
 	unsigned long ptr;
@@ -132,6 +149,7 @@ static int rseq_get_rseq_cs(struct task_struct *t, struct rseq_cs *rseq_cs)
 		return -EFAULT;
 	if (rseq_cs->version > 0)
 		return -EINVAL;
+	rseq_cs_compat(ksig, rseq_cs);
 
 	/* Ensure that abort_ip is not in the critical section. */
 	if (rseq_cs->abort_ip - rseq_cs->start_ip < rseq_cs->post_commit_offset)
@@ -209,14 +227,14 @@ static bool in_rseq_cs(unsigned long ip, struct rseq_cs *rseq_cs)
 	return ip - rseq_cs->start_ip < rseq_cs->post_commit_offset;
 }
 
-static int rseq_ip_fixup(struct pt_regs *regs)
+static int rseq_ip_fixup(struct ksignal *ksig, struct pt_regs *regs)
 {
 	unsigned long ip = instruction_pointer(regs);
 	struct task_struct *t = current;
 	struct rseq_cs rseq_cs;
 	int ret;
 
-	ret = rseq_get_rseq_cs(t, &rseq_cs);
+	ret = rseq_get_rseq_cs(ksig, t, &rseq_cs);
 	if (ret)
 		return ret;
 
@@ -260,7 +278,7 @@ void __rseq_handle_notify_resume(struct ksignal *ksig, struct pt_regs *regs)
 		return;
 	if (unlikely(!access_ok(VERIFY_WRITE, t->rseq, sizeof(*t->rseq))))
 		goto error;
-	ret = rseq_ip_fixup(regs);
+	ret = rseq_ip_fixup(ksig, regs);
 	if (unlikely(ret < 0))
 		goto error;
 	if (unlikely(rseq_update_cpu_id(t)))
@@ -287,7 +305,7 @@ void rseq_syscall(struct pt_regs *regs)
 	if (!t->rseq)
 		return;
 	if (!access_ok(VERIFY_READ, t->rseq, sizeof(*t->rseq)) ||
-	    rseq_get_rseq_cs(t, &rseq_cs) || in_rseq_cs(ip, &rseq_cs))
+	    rseq_get_rseq_cs(NULL, t, &rseq_cs) || in_rseq_cs(ip, &rseq_cs))
 		force_sig(SIGSEGV, t);
 }
 
