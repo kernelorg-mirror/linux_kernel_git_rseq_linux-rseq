@@ -112,6 +112,29 @@ static int rseq_reset_rseq_cpu_id(struct task_struct *t)
 	return 0;
 }
 
+#ifndef __LP64__
+/*
+ * Ensure that padding is zero.
+ */
+static int check_rseq_cs_padding(struct task_struct *t)
+{
+	unsigned long pad;
+	int ret;
+
+	ret = __get_user(pad, &t->rseq->rseq_cs_padding);
+	if (ret)
+		return ret;
+	if (pad)
+		return -EFAULT;
+	return 0;
+}
+#else
+static int check_rseq_cs_padding(struct task_struct *t)
+{
+	return 0;
+}
+#endif
+
 static int rseq_get_rseq_cs(struct task_struct *t, struct rseq_cs *rseq_cs)
 {
 	struct rseq_cs __user *urseq_cs;
@@ -121,6 +144,9 @@ static int rseq_get_rseq_cs(struct task_struct *t, struct rseq_cs *rseq_cs)
 	int ret;
 
 	ret = __get_user(ptr, &t->rseq->rseq_cs);
+	if (ret)
+		return ret;
+	ret = check_rseq_cs_padding(t);
 	if (ret)
 		return ret;
 	if (!ptr) {
