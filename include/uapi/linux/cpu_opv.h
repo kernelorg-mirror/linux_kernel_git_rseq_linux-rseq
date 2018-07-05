@@ -27,13 +27,7 @@
  * SOFTWARE.
  */
 
-#ifdef __KERNEL__
-# include <linux/types.h>
-#else
-# include <stdint.h>
-#endif
-
-#include <linux/types_32_64.h>
+#include <linux/types.h>
 
 #define CPU_OP_VEC_LEN_MAX		16
 #define CPU_OP_ARG_LEN_MAX		24
@@ -87,29 +81,29 @@ struct cpu_op {
 	__u32 len;
 	union {
 		struct {
-			LINUX_FIELD_u32_u64(a);
-			LINUX_FIELD_u32_u64(b);
+			__u64 a;
+			__u64 b;
 			__u8 expect_fault_a;
 			__u8 expect_fault_b;
 		} compare_op;
 		struct {
-			LINUX_FIELD_u32_u64(dst);
-			LINUX_FIELD_u32_u64(src);
+			__u64 dst;
+			__u64 src;
 			__u8 expect_fault_dst;
 			__u8 expect_fault_src;
 		} memcpy_op;
 		struct {
-			LINUX_FIELD_u32_u64(p);
+			__u64 p;
 			__s64 count;
 			__u8 expect_fault_p;
 		} arithmetic_op;
 		struct {
-			LINUX_FIELD_u32_u64(p);
+			__u64 p;
 			__u64 mask;
 			__u8 expect_fault_p;
 		} bitwise_op;
 		struct {
-			LINUX_FIELD_u32_u64(p);
+			__u64 p;
 			__u32 bits;
 			__u8 expect_fault_p;
 		} shift_op;
