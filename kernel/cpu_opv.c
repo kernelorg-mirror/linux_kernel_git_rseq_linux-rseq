@@ -144,10 +144,18 @@ static unsigned long cpu_op_range_nr_pages(unsigned long addr,
 	return ((addr + len - 1) >> PAGE_SHIFT) - (addr >> PAGE_SHIFT) + 1;
 }
 
-static int cpu_op_count_pages(unsigned long addr, unsigned long len)
+static int cpu_op_count_pages(u64 addr, unsigned long len)
 {
 	unsigned long nr_pages;
 
+	/*
+	 * Validate that the address is within the process address space.
+	 * This allows cast of those addresses to unsigned long throughout the
+	 * rest of this system call, because it would be invalid to have an
+	 * address over 4GB on a 32-bit kernel.
+	 */
+	if (addr >= TASK_SIZE)
+		return -EINVAL;
 	if (!len)
 		return 0;
 	nr_pages = cpu_op_range_nr_pages(addr, len);
@@ -228,7 +236,7 @@ static int cpu_opv_check_op(struct cpu_op *op, int *nr_vaddr, uint32_t *sum)
 		return -EINVAL;
 	}
 
-	/* Count pages and virtual addresses. */
+	/* Validate pointers, count pages and virtual addresses. */
 	switch (op->op) {
 	case CPU_COMPARE_EQ_OP:
 	case CPU_COMPARE_NE_OP:
@@ -389,8 +397,8 @@ static int cpu_op_pin_pages(unsigned long addr, unsigned long len,
 	struct mm_struct *mm = current->mm;
 
 	nr_pages = cpu_op_count_pages(addr, len);
-	if (!nr_pages)
-		return 0;
+	if (nr_pages <= 0)
+		return nr_pages;
 again:
 	down_read(&mm->mmap_sem);
 	ret = get_user_pages(addr, nr_pages, write ? FOLL_WRITE : 0, pages,
@@ -466,7 +474,7 @@ static int cpu_opv_pin_pages_op(struct cpu_op *op,
 		ret = -EFAULT;
 		*expect_fault = op->u.compare_op.expect_fault_a;
 		if (!access_ok(VERIFY_READ,
-			       (void __user *)op->u.compare_op.a,
+			       (void __user *)(unsigned long)op->u.compare_op.a,
 			       op->len))
 			return ret;
 		ret = cpu_op_pin_pages(op->u.compare_op.a, op->len,
@@ -477,7 +485,7 @@ static int cpu_opv_pin_pages_op(struct cpu_op *op,
 		ret = -EFAULT;
 		*expect_fault = op->u.compare_op.expect_fault_b;
 		if (!access_ok(VERIFY_READ,
-			       (void __user *)op->u.compare_op.b,
+			       (void __user *)(unsigned long)op->u.compare_op.b,
 			       op->len))
 			return ret;
 		ret = cpu_op_pin_pages(op->u.compare_op.b, op->len,
@@ -490,7 +498,7 @@ static int cpu_opv_pin_pages_op(struct cpu_op *op,
 		ret = -EFAULT;
 		*expect_fault = op->u.memcpy_op.expect_fault_dst;
 		if (!access_ok(VERIFY_WRITE,
-			       (void __user *)op->u.memcpy_op.dst,
+			       (void __user *)(unsigned long)op->u.memcpy_op.dst,
 			       op->len))
 			return ret;
 		ret = cpu_op_pin_pages(op->u.memcpy_op.dst, op->len,
@@ -501,7 +509,7 @@ static int cpu_opv_pin_pages_op(struct cpu_op *op,
 		ret = -EFAULT;
 		*expect_fault = op->u.memcpy_op.expect_fault_src;
 		if (!access_ok(VERIFY_READ,
-			       (void __user *)op->u.memcpy_op.src,
+			       (void __user *)(unsigned long)op->u.memcpy_op.src,
 			       op->len))
 			return ret;
 		ret = cpu_op_pin_pages(op->u.memcpy_op.src, op->len,
@@ -514,7 +522,7 @@ static int cpu_opv_pin_pages_op(struct cpu_op *op,
 		ret = -EFAULT;
 		*expect_fault = op->u.arithmetic_op.expect_fault_p;
 		if (!access_ok(VERIFY_WRITE,
-			       (void __user *)op->u.arithmetic_op.p,
+			       (void __user *)(unsigned long)op->u.arithmetic_op.p,
 			       op->len))
 			return ret;
 		ret = cpu_op_pin_pages(op->u.arithmetic_op.p, op->len,
@@ -529,7 +537,7 @@ static int cpu_opv_pin_pages_op(struct cpu_op *op,
 		ret = -EFAULT;
 		*expect_fault = op->u.bitwise_op.expect_fault_p;
 		if (!access_ok(VERIFY_WRITE,
-			       (void __user *)op->u.bitwise_op.p,
+			       (void __user *)(unsigned long)op->u.bitwise_op.p,
 			       op->len))
 			return ret;
 		ret = cpu_op_pin_pages(op->u.bitwise_op.p, op->len,
@@ -543,7 +551,7 @@ static int cpu_opv_pin_pages_op(struct cpu_op *op,
 		ret = -EFAULT;
 		*expect_fault = op->u.shift_op.expect_fault_p;
 		if (!access_ok(VERIFY_WRITE,
-			       (void __user *)op->u.shift_op.p,
+			       (void __user *)(unsigned long)op->u.shift_op.p,
 			       op->len))
 			return ret;
 		ret = cpu_op_pin_pages(op->u.shift_op.p, op->len,
