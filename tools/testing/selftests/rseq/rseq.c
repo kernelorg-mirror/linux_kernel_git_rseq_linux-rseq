@@ -25,38 +25,17 @@
 #include <syscall.h>
 #include <assert.h>
 #include <signal.h>
+#include <limits.h>
 
 #include "rseq.h"
 
 #define ARRAY_SIZE(arr)	(sizeof(arr) / sizeof((arr)[0]))
 
-__attribute__((tls_model("initial-exec"))) __thread
-volatile struct rseq __rseq_abi = {
+__thread volatile struct rseq __rseq_abi = {
 	.cpu_id = RSEQ_CPU_ID_UNINITIALIZED,
 };
 
-static __attribute__((tls_model("initial-exec"))) __thread
-volatile int refcount;
-
-static void signal_off_save(sigset_t *oldset)
-{
-	sigset_t set;
-	int ret;
-
-	sigfillset(&set);
-	ret = pthread_sigmask(SIG_BLOCK, &set, oldset);
-	if (ret)
-		abort();
-}
-
-static void signal_restore(sigset_t oldset)
-{
-	int ret;
-
-	ret = pthread_sigmask(SIG_SETMASK, &oldset, NULL);
-	if (ret)
-		abort();
-}
+__thread volatile struct rseq_lib_abi __rseq_lib_abi;
 
 static int sys_rseq(volatile struct rseq *rseq_abi, uint32_t rseq_len,
 		    int flags, uint32_t sig)
@@ -67,10 +46,19 @@ static int sys_rseq(volatile struct rseq *rseq_abi, uint32_t rseq_len,
 int rseq_register_current_thread(void)
 {
 	int rc, ret = 0;
-	sigset_t oldset;
 
-	signal_off_save(&oldset);
-	if (refcount++)
+	/*
+	 * Nested signal handlers need to check whether registration is
+	 * allowed.
+	 */
+	if (__rseq_lib_abi.register_state != RSEQ_REGISTER_ALLOWED)
+		return -1;
+	__rseq_lib_abi.register_state = RSEQ_REGISTER_ONGOING;
+	if (__rseq_lib_abi.refcount == UINT_MAX) {
+		ret = -1;
+		goto end;
+	}
+	if (__rseq_lib_abi.refcount++)
 		goto end;
 	rc = sys_rseq(&__rseq_abi, sizeof(struct rseq), 0, RSEQ_SIG);
 	if (!rc) {
@@ -78,21 +66,26 @@ int rseq_register_current_thread(void)
 		goto end;
 	}
 	if (errno != EBUSY)
-		__rseq_abi.cpu_id = -2;
+		__rseq_abi.cpu_id = RSEQ_CPU_ID_REGISTRATION_FAILED;
 	ret = -1;
-	refcount--;
+	__rseq_lib_abi.refcount--;
 end:
-	signal_restore(oldset);
+	__rseq_lib_abi.register_state = RSEQ_REGISTER_ALLOWED;
 	return ret;
 }
 
 int rseq_unregister_current_thread(void)
 {
 	int rc, ret = 0;
-	sigset_t oldset;
 
-	signal_off_save(&oldset);
-	if (--refcount)
+	if (__rseq_lib_abi.register_state != RSEQ_REGISTER_ALLOWED)
+		return -1;
+	__rseq_lib_abi.register_state = RSEQ_REGISTER_ONGOING;
+	if (!__rseq_lib_abi.refcount) {
+		ret = -1;
+		goto end;
+	}
+	if (--__rseq_lib_abi.refcount)
 		goto end;
 	rc = sys_rseq(&__rseq_abi, sizeof(struct rseq),
 		      RSEQ_FLAG_UNREGISTER, RSEQ_SIG);
@@ -100,7 +93,7 @@ int rseq_unregister_current_thread(void)
 		goto end;
 	ret = -1;
 end:
-	signal_restore(oldset);
+	__rseq_lib_abi.register_state = RSEQ_REGISTER_ALLOWED;
 	return ret;
 }
 
