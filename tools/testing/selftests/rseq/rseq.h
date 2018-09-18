@@ -44,7 +44,19 @@
 #define RSEQ_INJECT_FAILED
 #endif
 
+enum rseq_register_state {
+	RSEQ_REGISTER_ALLOWED = 0,
+	RSEQ_REGISTER_ONGOING = 1,
+	RSEQ_REGISTER_EXITING = 2,
+};
+
+struct rseq_lib_abi {
+	uint32_t register_state;	/* enum rseq_register_state */
+	uint32_t refcount;
+};
+
 extern __thread volatile struct rseq __rseq_abi;
+extern __thread volatile struct rseq_lib_abi __rseq_lib_abi;
 
 #define rseq_likely(x)		__builtin_expect(!!(x), 1)
 #define rseq_unlikely(x)	__builtin_expect(!!(x), 0)
