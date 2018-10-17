@@ -1123,10 +1123,11 @@ void vm_unmap_ram(const void *mem, unsigned int count)
 	struct vmap_area *va;
 
 	might_sleep();
-	BUG_ON(!addr);
-	BUG_ON(addr < VMALLOC_START);
-	BUG_ON(addr > VMALLOC_END);
-	BUG_ON(!PAGE_ALIGNED(addr));
+	if (WARN_ON_ONCE(!addr) ||
+	    WARN_ON_ONCE(addr < VMALLOC_START) ||
+	    WARN_ON_ONCE(addr > VMALLOC_END) ||
+	    WARN_ON_ONCE(!PAGE_ALIGNED(addr)))
+		return;
 
 	if (likely(count <= VMAP_MAX_ALLOC)) {
 		debug_check_no_locks_freed(mem, size);
@@ -1135,7 +1136,8 @@ void vm_unmap_ram(const void *mem, unsigned int count)
 	}
 
 	va = find_vmap_area(addr);
-	BUG_ON(!va);
+	if (WARN_ON_ONCE(!va))
+		return;
 	debug_check_no_locks_freed((void *)va->va_start,
 				    (va->va_end - va->va_start));
 	free_unmap_vmap_area(va);
