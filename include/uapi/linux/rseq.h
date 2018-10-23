@@ -53,6 +53,8 @@ struct rseq_cs {
 	__u64 abort_ip;
 } __attribute__((aligned(4 * sizeof(__u64))));
 
+#define RSEQ_FEATURE_REFCOUNT_FIELD
+
 /*
  * struct rseq is aligned on 4 * 8 bytes to ensure it is always
  * contained within a single cache-line.
@@ -142,6 +144,16 @@ struct rseq {
 	 *     this thread.
 	 */
 	__u32 flags;
+	/*
+	 * Reference count of number of users (application, libraries)
+	 * wishing to register rseq for this thread. This reference
+	 * counter must be incremented and decremented atomically with
+	 * respect to signal delivery. On transition from 0 to 1, a rseq
+	 * system call must be issued to register rseq for this thread. On
+	 * transition from 1 to 0, a rseq unregister system call must be
+	 * issued.
+	 */
+	__u32 refcount;
 } __attribute__((aligned(4 * sizeof(__u64))));
 
 #endif /* _UAPI_LINUX_RSEQ_H */
