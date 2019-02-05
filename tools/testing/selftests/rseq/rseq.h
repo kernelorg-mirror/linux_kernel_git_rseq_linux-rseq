@@ -57,6 +57,7 @@ struct rseq_lib_abi {
 
 extern __thread volatile struct rseq __rseq_abi;
 extern __thread volatile struct rseq_lib_abi __rseq_lib_abi;
+extern __thread volatile uint32_t __rseq_abi_node_id;
 
 #define rseq_likely(x)		__builtin_expect(!!(x), 1)
 #define rseq_unlikely(x)	__builtin_expect(!!(x), 0)
@@ -115,12 +116,26 @@ int rseq_unregister_current_thread(void);
 int32_t rseq_fallback_current_cpu(void);
 
 /*
+ * Restartable sequence fallback for reading the current NUMA node ID.
+ */
+int32_t rseq_fallback_current_node(void);
+
+/*
  * Values returned can be either the current CPU number, -1 (rseq is
  * uninitialized), or -2 (rseq initialization has failed).
  */
 static inline int32_t rseq_current_cpu_raw(void)
 {
 	return RSEQ_ACCESS_ONCE(__rseq_abi.cpu_id);
+}
+
+/*
+ * Values returned can be either the current node number, -1 (rseq node_id
+ * is uninitialized), or -2 (rseq node_id initialization has failed).
+ */
+static inline int32_t rseq_current_node_raw(void)
+{
+	return RSEQ_ACCESS_ONCE(__rseq_abi_node_id);
 }
 
 /*
@@ -147,6 +162,16 @@ static inline uint32_t rseq_current_cpu(void)
 	if (rseq_unlikely(cpu < 0))
 		cpu = rseq_fallback_current_cpu();
 	return cpu;
+}
+
+static inline uint32_t rseq_current_node(void)
+{
+	int32_t node;
+
+	node = rseq_current_node_raw();
+	if (rseq_unlikely(node < 0))
+		node = rseq_fallback_current_node();
+	return node;
 }
 
 static inline void rseq_clear_rseq_cs(void)
