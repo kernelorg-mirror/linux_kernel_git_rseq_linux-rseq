@@ -89,6 +89,12 @@ static int rseq_update_cpu_id(struct task_struct *t)
 		return -EFAULT;
 	if (put_user(cpu_id, &t->rseq->cpu_id))
 		return -EFAULT;
+	if (t->rseq_node_id) {
+		u32 node_id = cpu_to_node(cpu_id);
+
+		if (put_user(node_id, t->rseq_node_id))
+			return -EFAULT;
+	}
 	trace_rseq_update(t);
 	return 0;
 }
@@ -108,6 +114,17 @@ static int rseq_reset_rseq_cpu_id(struct task_struct *t)
 	 * registered again.
 	 */
 	if (put_user(cpu_id, &t->rseq->cpu_id))
+		return -EFAULT;
+	return 0;
+}
+
+static int rseq_reset_rseq_node_id(struct task_struct *t)
+{
+	u32 node_id = RSEQ_NODE_ID_UNINITIALIZED;
+
+	if (!t->rseq_node_id)
+		return 0;
+	if (put_user(node_id, t->rseq_node_id))
 		return -EFAULT;
 	return 0;
 }
@@ -301,19 +318,77 @@ void rseq_syscall(struct pt_regs *regs)
 
 #endif
 
-/*
- * sys_rseq - setup restartable sequences for caller thread.
- */
-SYSCALL_DEFINE4(rseq, struct rseq __user *, rseq, u32, rseq_len,
-		int, flags, u32, sig)
+static int rseq_register(void __user *uptr, u32 len, int flags, u32 sig)
+{
+	if (likely(!flags)) {
+		struct rseq __user *rseq = uptr;
+
+		if (current->rseq) {
+			/*
+			 * If rseq is already registered, check whether
+			 * the provided address differs from the prior
+			 * one.
+			 */
+			if (current->rseq != rseq || len != sizeof(*rseq))
+				return -EINVAL;
+			if (current->rseq_sig != sig)
+				return -EPERM;
+			/* Already registered. */
+			return -EBUSY;
+		}
+
+		/*
+		 * If there was no rseq previously registered,
+		 * ensure the provided rseq is properly aligned and valid.
+		 */
+		if (!IS_ALIGNED((unsigned long)rseq, __alignof__(*rseq)) ||
+		    len != sizeof(*rseq))
+			return -EINVAL;
+		if (!access_ok(rseq, len))
+			return -EFAULT;
+		current->rseq = rseq;
+		current->rseq_sig = sig;
+	} else if (flags & RSEQ_FLAG_NODE_ID) {
+		u32 __user *node_id = uptr;
+
+		if (!IS_ALIGNED((unsigned long)node_id, __alignof(*node_id)) ||
+		    len != sizeof(*node_id))
+			return -EINVAL;
+		if (current->rseq_node_id) {
+			if (current->rseq_node_id != node_id)
+				return -EINVAL;
+			/* Already registered. */
+			return -EBUSY;
+		}
+		if (!access_ok(node_id, len))
+			return -EFAULT;
+		current->rseq_node_id = node_id;
+	} else {
+		return -EINVAL;
+	}
+
+	/*
+	 * If rseq was previously inactive, and has just been
+	 * registered, ensure the cpu_id_start and cpu_id fields
+	 * are updated before returning to user-space. If rseq_node_id
+	 * was previously unregistered, ensure the node_id is updated
+	 * before returning to user-space.
+	 */
+	rseq_set_notify_resume(current);
+	return 0;
+}
+
+static int rseq_unregister(void __user *uptr, u32 len, int flags, u32 sig)
 {
 	int ret;
 
-	if (flags & RSEQ_FLAG_UNREGISTER) {
+	if (likely(!flags)) {
+		struct rseq __user *rseq = uptr;
+
 		/* Unregister rseq for current thread. */
 		if (current->rseq != rseq || !current->rseq)
 			return -EINVAL;
-		if (rseq_len != sizeof(*rseq))
+		if (len != sizeof(*rseq))
 			return -EINVAL;
 		if (current->rseq_sig != sig)
 			return -EPERM;
@@ -322,43 +397,31 @@ SYSCALL_DEFINE4(rseq, struct rseq __user *, rseq, u32, rseq_len,
 			return ret;
 		current->rseq = NULL;
 		current->rseq_sig = 0;
-		return 0;
-	}
+	} else if (flags & RSEQ_FLAG_NODE_ID) {
+		u32 __user *node_id = uptr;
 
-	if (unlikely(flags))
-		return -EINVAL;
-
-	if (current->rseq) {
-		/*
-		 * If rseq is already registered, check whether
-		 * the provided address differs from the prior
-		 * one.
-		 */
-		if (current->rseq != rseq || rseq_len != sizeof(*rseq))
+		/* Unregister rseq_node_id for current thread. */
+		if (current->rseq_node_id != node_id || !current->rseq_node_id)
 			return -EINVAL;
-		if (current->rseq_sig != sig)
-			return -EPERM;
-		/* Already registered. */
-		return -EBUSY;
-	}
-
-	/*
-	 * If there was no rseq previously registered,
-	 * ensure the provided rseq is properly aligned and valid.
-	 */
-	if (!IS_ALIGNED((unsigned long)rseq, __alignof__(*rseq)) ||
-	    rseq_len != sizeof(*rseq))
+		if (len != sizeof(*node_id))
+			return -EINVAL;
+		ret = rseq_reset_rseq_node_id(current);
+		if (ret)
+			return ret;
+		current->rseq_node_id = NULL;
+	} else {
 		return -EINVAL;
-	if (!access_ok(rseq, rseq_len))
-		return -EFAULT;
-	current->rseq = rseq;
-	current->rseq_sig = sig;
-	/*
-	 * If rseq was previously inactive, and has just been
-	 * registered, ensure the cpu_id_start and cpu_id fields
-	 * are updated before returning to user-space.
-	 */
-	rseq_set_notify_resume(current);
-
+	}
 	return 0;
+}
+
+/*
+ * sys_rseq - setup restartable sequences for caller thread.
+ */
+SYSCALL_DEFINE4(rseq, void __user *, uptr, u32, len, int, flags, u32, sig)
+{
+	if (flags & RSEQ_FLAG_UNREGISTER)
+		return rseq_unregister(uptr, len, flags & ~RSEQ_FLAG_UNREGISTER, sig);
+	else
+		return rseq_register(uptr, len, flags, sig);
 }
