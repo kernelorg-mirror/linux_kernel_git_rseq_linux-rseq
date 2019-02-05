@@ -47,6 +47,8 @@ static int rseq_ownership;
 
 static __thread uint32_t __rseq_refcount;
 
+__thread uint32_t __rseq_abi_node_id = RSEQ_NODE_ID_UNINITIALIZED;
+
 static void signal_off_save(sigset_t *oldset)
 {
 	sigset_t set;
@@ -67,10 +69,9 @@ static void signal_restore(sigset_t oldset)
 		abort();
 }
 
-static int sys_rseq(struct rseq *rseq_abi, uint32_t rseq_len,
-		    int flags, uint32_t sig)
+static int sys_rseq(void *uptr, uint32_t len, int flags, uint32_t sig)
 {
-	return syscall(__NR_rseq, rseq_abi, rseq_len, flags, sig);
+	return syscall(__NR_rseq, uptr, len, flags, sig);
 }
 
 int rseq_register_current_thread(void)
@@ -88,14 +89,22 @@ int rseq_register_current_thread(void)
 	if (__rseq_refcount++)
 		goto end;
 	rc = sys_rseq(&__rseq_abi, sizeof(struct rseq), 0, RSEQ_SIG);
-	if (!rc) {
-		assert(rseq_current_cpu_raw() >= 0);
+	if (rc) {
+		if (errno != EBUSY)
+			__rseq_abi.cpu_id = RSEQ_CPU_ID_REGISTRATION_FAILED;
+		ret = -1;
+		__rseq_refcount--;
 		goto end;
 	}
-	if (errno != EBUSY)
-		__rseq_abi.cpu_id = RSEQ_CPU_ID_REGISTRATION_FAILED;
-	ret = -1;
-	__rseq_refcount--;
+	assert(rseq_current_cpu_raw() >= 0);
+
+	/* Try to register node_id if supported by the kernel. */
+	rc = sys_rseq(&__rseq_abi_node_id, sizeof(uint32_t),
+		      RSEQ_FLAG_NODE_ID, 0);
+	if (rc) {
+		if (errno != EBUSY)
+			__rseq_abi_node_id = RSEQ_NODE_ID_REGISTRATION_FAILED;
+	}
 end:
 	signal_restore(oldset);
 	return ret;
@@ -117,10 +126,15 @@ int rseq_unregister_current_thread(void)
 		goto end;
 	rc = sys_rseq(&__rseq_abi, sizeof(struct rseq),
 		      RSEQ_FLAG_UNREGISTER, RSEQ_SIG);
-	if (!rc)
+	if (rc) {
+		__rseq_refcount = 1;
+		ret = -1;
 		goto end;
-	__rseq_refcount = 1;
-	ret = -1;
+	}
+
+	/* Try to unregister node_id if supported by the kernel. */
+	(void)sys_rseq(&__rseq_abi_node_id, sizeof(uint32_t),
+		      RSEQ_FLAG_UNREGISTER | RSEQ_FLAG_NODE_ID, 0);
 end:
 	signal_restore(oldset);
 	return ret;
@@ -136,6 +150,24 @@ int32_t rseq_fallback_current_cpu(void)
 		abort();
 	}
 	return cpu;
+}
+
+static int rseq_getcpu_wrapper(unsigned int *cpu, unsigned int *node)
+{
+	return syscall(__NR_getcpu, cpu, node, NULL);
+}
+
+int32_t rseq_fallback_current_node(void)
+{
+	uint32_t cpu, node;
+	int ret;
+
+	ret = rseq_getcpu_wrapper(&cpu, &node);
+	if (ret < 0) {
+		perror("getcpu system call");
+		abort();
+	}
+	return node;
 }
 
 void __attribute__((constructor)) rseq_init(void)
