@@ -29,6 +29,8 @@ void test_cpu_pointer(void)
 			assert(rseq_current_cpu() == i);
 			assert(rseq_current_cpu_raw() == i);
 			assert(rseq_cpu_start() == i);
+			assert(rseq_current_node_raw() ==
+			       rseq_fallback_current_node());
 			CPU_CLR(i, &test_affinity);
 		}
 	}
@@ -42,7 +44,7 @@ int main(int argc, char **argv)
 			errno, strerror(errno));
 		goto init_thread_error;
 	}
-	printf("testing current cpu\n");
+	printf("testing current cpu and NUMA node id\n");
 	test_cpu_pointer();
 	if (rseq_unregister_current_thread()) {
 		fprintf(stderr, "Error: rseq_unregister_current_thread(...) failed(%d): %s\n",
