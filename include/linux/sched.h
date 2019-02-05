@@ -1060,6 +1060,7 @@ struct task_struct {
 #ifdef CONFIG_RSEQ
 	struct rseq __user *rseq;
 	u32 rseq_sig;
+	u32 __user *rseq_node_id;
 	/*
 	 * RmW on rseq_event_mask must be performed atomically
 	 * with respect to preemption.
@@ -1852,10 +1853,12 @@ static inline void rseq_fork(struct task_struct *t, unsigned long clone_flags)
 	if (clone_flags & CLONE_THREAD) {
 		t->rseq = NULL;
 		t->rseq_sig = 0;
+		t->rseq_node_id = NULL;
 		t->rseq_event_mask = 0;
 	} else {
 		t->rseq = current->rseq;
 		t->rseq_sig = current->rseq_sig;
+		t->rseq_node_id = current->rseq_node_id;
 		t->rseq_event_mask = current->rseq_event_mask;
 	}
 }
@@ -1864,6 +1867,7 @@ static inline void rseq_execve(struct task_struct *t)
 {
 	t->rseq = NULL;
 	t->rseq_sig = 0;
+	t->rseq_node_id = NULL;
 	t->rseq_event_mask = 0;
 }
 
