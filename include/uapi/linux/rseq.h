@@ -18,8 +18,14 @@ enum rseq_cpu_id_state {
 	RSEQ_CPU_ID_REGISTRATION_FAILED		= -2,
 };
 
+enum rseq_node_id_state {
+	RSEQ_NODE_ID_UNINITIALIZED		= -1,
+	RSEQ_NODE_ID_REGISTRATION_FAILED	= -2,
+};
+
 enum rseq_flags {
-	RSEQ_FLAG_UNREGISTER = (1 << 0),
+	RSEQ_FLAG_UNREGISTER			= (1 << 0),
+	RSEQ_FLAG_NODE_ID			= (1 << 1),
 };
 
 enum rseq_cs_flags_bit {
