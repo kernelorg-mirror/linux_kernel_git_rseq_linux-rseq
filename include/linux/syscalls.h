@@ -67,7 +67,6 @@ struct old_linux_dirent;
 struct perf_event_attr;
 struct file_handle;
 struct sigaltstack;
-struct rseq;
 struct cpu_op;
 union bpf_attr;
 struct io_uring_params;
@@ -984,7 +983,7 @@ asmlinkage long sys_pkey_alloc(unsigned long flags, unsigned long init_val);
 asmlinkage long sys_pkey_free(int pkey);
 asmlinkage long sys_statx(int dfd, const char __user *path, unsigned flags,
 			  unsigned mask, struct statx __user *buffer);
-asmlinkage long sys_rseq(struct rseq __user *rseq, uint32_t rseq_len,
+asmlinkage long sys_rseq(void __user *uptr, uint32_t len,
 			 int flags, uint32_t sig);
 asmlinkage long sys_pidfd_send_signal(int pidfd, int sig,
 				       siginfo_t __user *info,
