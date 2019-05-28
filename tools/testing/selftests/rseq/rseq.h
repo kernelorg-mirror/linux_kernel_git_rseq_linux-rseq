@@ -109,7 +109,7 @@ int32_t rseq_fallback_current_cpu(void);
  */
 static inline int32_t rseq_current_cpu_raw(void)
 {
-	return RSEQ_ACCESS_ONCE(__rseq_abi.cpu_id);
+	return RSEQ_READ_ONCE(__rseq_abi.cpu_id);
 }
 
 /*
@@ -125,7 +125,7 @@ static inline int32_t rseq_current_cpu_raw(void)
  */
 static inline uint32_t rseq_cpu_start(void)
 {
-	return RSEQ_ACCESS_ONCE(__rseq_abi.cpu_id_start);
+	return RSEQ_READ_ONCE(__rseq_abi.cpu_id_start);
 }
 
 static inline uint32_t rseq_current_cpu(void)
@@ -141,9 +141,9 @@ static inline uint32_t rseq_current_cpu(void)
 static inline void rseq_clear_rseq_cs(void)
 {
 #ifdef __LP64__
-	__rseq_abi.rseq_cs.ptr = 0;
+	RSEQ_WRITE_ONCE(__rseq_abi.rseq_cs.ptr, 0);
 #else
-	__rseq_abi.rseq_cs.ptr.ptr32 = 0;
+	RSEQ_WRITE_ONCE(__rseq_abi.rseq_cs.ptr.ptr32, 0);
 #endif
 }
 
